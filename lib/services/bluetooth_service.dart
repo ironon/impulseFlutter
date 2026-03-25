@@ -1,7 +1,10 @@
 import 'dart:convert';
+
 import 'package:flutter_blue_plus/flutter_blue_plus.dart' as fbp;
 import 'package:shared_preferences/shared_preferences.dart';
+
 import '../models/bluetooth_device_model.dart';
+import '../utils/ble_constants.dart';
 
 class BluetoothService {
   static final BluetoothService _instance = BluetoothService._internal();
@@ -13,52 +16,53 @@ class BluetoothService {
 
   List<BluetoothDeviceModel> get deviceHistory => _deviceHistory;
 
-  // Initialize and load device history
+  List<BluetoothDeviceModel> get watches =>
+      _deviceHistory.where((d) => d.deviceType == DeviceType.watch).toList();
+
+  List<BluetoothDeviceModel> get anchors =>
+      _deviceHistory.where((d) => d.deviceType == DeviceType.anchor).toList();
+
   Future<void> initialize() async {
     await _loadDeviceHistory();
   }
 
-  // Load device history from shared preferences
   Future<void> _loadDeviceHistory() async {
     final prefs = await SharedPreferences.getInstance();
-    final String? devicesJson = prefs.getString(_devicesKey);
-
-    if (devicesJson != null) {
-      final List<dynamic> decoded = jsonDecode(devicesJson);
+    final String? json = prefs.getString(_devicesKey);
+    if (json != null) {
+      final List<dynamic> decoded = jsonDecode(json);
       _deviceHistory = decoded
-          .map((json) => BluetoothDeviceModel.fromJson(json))
+          .map((j) => BluetoothDeviceModel.fromJson(j as Map<String, dynamic>))
           .toList();
     }
   }
 
-  // Save device history to shared preferences
   Future<void> _saveDeviceHistory() async {
     final prefs = await SharedPreferences.getInstance();
-    final String encoded = jsonEncode(
-      _deviceHistory.map((device) => device.toJson()).toList(),
+    await prefs.setString(
+      _devicesKey,
+      jsonEncode(_deviceHistory.map((d) => d.toJson()).toList()),
     );
-    await prefs.setString(_devicesKey, encoded);
   }
 
-  // Add or update a device in history
   Future<void> addOrUpdateDevice(BluetoothDeviceModel device) async {
-    final index = _deviceHistory.indexWhere((d) => d.id == device.id);
-
-    if (index != -1) {
-      _deviceHistory[index] = device;
+    final idx = _deviceHistory.indexWhere((d) => d.id == device.id);
+    if (idx != -1) {
+      _deviceHistory[idx] = device;
     } else {
       _deviceHistory.add(device);
     }
-
     await _saveDeviceHistory();
   }
 
-  // Update device connection status
-  Future<void> updateDeviceStatus(String deviceId, bool isConnected, int rssi) async {
-    final index = _deviceHistory.indexWhere((d) => d.id == deviceId);
-
-    if (index != -1) {
-      _deviceHistory[index] = _deviceHistory[index].copyWith(
+  Future<void> updateDeviceStatus(
+    String deviceId,
+    bool isConnected,
+    int rssi,
+  ) async {
+    final idx = _deviceHistory.indexWhere((d) => d.id == deviceId);
+    if (idx != -1) {
+      _deviceHistory[idx] = _deviceHistory[idx].copyWith(
         isConnected: isConnected,
         rssi: rssi,
         lastSeen: DateTime.now(),
@@ -67,36 +71,80 @@ class BluetoothService {
     }
   }
 
-  // Start scanning for devices
+  Future<void> updateAnchorIp(
+    String anchorId,
+    String ipAddress,
+  ) async {
+    final idx = _deviceHistory.indexWhere((d) => d.id == anchorId);
+    if (idx != -1) {
+      _deviceHistory[idx] = _deviceHistory[idx].copyWith(
+        ipAddress: ipAddress,
+        ipLastUpdated: DateTime.now(),
+      );
+      await _saveDeviceHistory();
+    }
+  }
+
+  // ── Scanning ─────────────────────────────────────────────────────────────
+
+  /// Starts a BLE scan and returns scan results as a stream.
+  /// Devices advertising [WATCH_SERVICE_UUID] are typed as [DeviceType.watch].
+  /// Devices with iBeacon manufacturer data (Apple company ID) may be anchors.
   Stream<List<fbp.ScanResult>> startScan() async* {
-    // Check if Bluetooth is available
     if (await fbp.FlutterBluePlus.isSupported == false) {
       throw Exception('Bluetooth not supported by this device');
     }
 
-    // Start scanning
-    await fbp.FlutterBluePlus.startScan(timeout: const Duration(seconds: 15));
+    await fbp.FlutterBluePlus.startScan(
+      timeout: const Duration(seconds: 15),
+    );
 
-    // Listen to scan results
     yield* fbp.FlutterBluePlus.scanResults;
   }
 
-  // Stop scanning
   Future<void> stopScan() async {
     await fbp.FlutterBluePlus.stopScan();
   }
 
-  // Connect to a device
-  Future<void> connectToDevice(fbp.BluetoothDevice device) async {
-    await device.connect();
+  /// Infers the device type from advertisement data.
+  DeviceType classifyDevice(fbp.ScanResult result) {
+    // Watch advertises with its service UUID
+    for (final svcUuid in result.advertisementData.serviceUuids) {
+      if (svcUuid.str.toLowerCase() == BleConstants.watchServiceUuid) {
+        return DeviceType.watch;
+      }
+    }
+    // Anchor advertises as iBeacon (Apple manufacturer data 0x004C)
+    final mfr = result.advertisementData.manufacturerData;
+    if (mfr.containsKey(0x004C)) {
+      final data = mfr[0x004C]!;
+      if (data.length >= 23 &&
+          data[0] == BleConstants.iBeaconType &&
+          data[1] == BleConstants.iBeaconLength) {
+        return DeviceType.anchor;
+      }
+    }
+    return DeviceType.unknown;
   }
 
-  // Disconnect from a device
-  Future<void> disconnectFromDevice(fbp.BluetoothDevice device) async {
-    await device.disconnect();
+  /// Extracts the anchor UUID from an iBeacon advertisement.
+  /// Returns null if this is not a valid iBeacon.
+  String? extractAnchorUuid(fbp.ScanResult result) {
+    final mfr = result.advertisementData.manufacturerData;
+    if (!mfr.containsKey(0x004C)) return null;
+    final data = mfr[0x004C]!;
+    if (data.length < 23 ||
+        data[0] != BleConstants.iBeaconType ||
+        data[1] != BleConstants.iBeaconLength) { return null; }
+    // UUID starts at offset 2 in the payload (after type + length bytes)
+    final uuidBytes = data.sublist(2, 18);
+    String h(int s, int e) => uuidBytes
+        .sublist(s, e)
+        .map((b) => b.toRadixString(16).padLeft(2, '0'))
+        .join();
+    return '${h(0,4)}-${h(4,6)}-${h(6,8)}-${h(8,10)}-${h(10,16)}';
   }
 
-  // Get signal strength description
   String getSignalStrength(int rssi) {
     if (rssi >= -50) return 'Excellent';
     if (rssi >= -60) return 'Good';

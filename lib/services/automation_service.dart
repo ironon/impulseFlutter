@@ -7,149 +7,96 @@ class AutomationService {
   factory AutomationService() => _instance;
   AutomationService._internal();
 
-  static const String _automationsKey = 'automations';
+  static const String _automationsKey = 'automations_v2';
   List<Automation> _automations = [];
 
   List<Automation> get automations => _automations;
 
-  // Initialize and load automations
-  Future<void> initialize() async {
-    await _loadAutomations();
-  }
+  Future<void> initialize() async => _loadAutomations();
 
-  // Load automations from shared preferences
   Future<void> _loadAutomations() async {
     final prefs = await SharedPreferences.getInstance();
-    final String? automationsJson = prefs.getString(_automationsKey);
-
-    if (automationsJson != null) {
-      final List<dynamic> decoded = jsonDecode(automationsJson);
-      _automations = decoded
-          .map((json) => Automation.fromJson(json))
-          .toList();
+    final String? json = prefs.getString(_automationsKey);
+    if (json != null) {
+      try {
+        final List<dynamic> decoded = jsonDecode(json);
+        _automations =
+            decoded.map((j) => Automation.fromJson(j as Map<String, dynamic>)).toList();
+      } catch (_) {
+        _automations = [];
+      }
     }
   }
 
-  // Save automations to shared preferences
   Future<void> _saveAutomations() async {
     final prefs = await SharedPreferences.getInstance();
-    final String encoded = jsonEncode(
-      _automations.map((automation) => automation.toJson()).toList(),
+    await prefs.setString(
+      _automationsKey,
+      jsonEncode(_automations.map((a) => a.toJson()).toList()),
     );
-    await prefs.setString(_automationsKey, encoded);
   }
 
-  // Add a new automation
-  Future<void> addAutomation(Automation automation) async {
-    _automations.add(automation);
+  Future<void> addAutomation(Automation a) async {
+    _automations.add(a);
     await _saveAutomations();
   }
 
-  // Update an existing automation
-  Future<void> updateAutomation(Automation automation) async {
-    final index = _automations.indexWhere((a) => a.id == automation.id);
-    if (index != -1) {
-      _automations[index] = automation;
+  Future<void> updateAutomation(Automation a) async {
+    final idx = _automations.indexWhere((e) => e.id == a.id);
+    if (idx != -1) {
+      _automations[idx] = a;
       await _saveAutomations();
     }
   }
 
-  // Delete an automation
-  Future<void> deleteAutomation(String automationId) async {
-    _automations.removeWhere((a) => a.id == automationId);
+  Future<void> deleteAutomation(String id) async {
+    _automations.removeWhere((a) => a.id == id);
     await _saveAutomations();
   }
 
-  // Get automations for a specific date
-  List<Automation> getAutomationsForDate(DateTime date) {
-    return _automations
-        .where((automation) => automation.appearsOnDate(date))
-        .toList();
-  }
+  List<Automation> getAutomationsForDate(DateTime date) =>
+      _automations.where((a) => a.appearsOnDate(date)).toList();
 
-  // Export automations for a specific date to JSON
-  String exportAutomationsForDate(DateTime date) {
-    final automationsForDate = getAutomationsForDate(date);
-    final List<Map<String, dynamic>> jsonList = automationsForDate
-        .map((automation) => automation.toJson())
-        .toList();
+  // ── Layout helpers ────────────────────────────────────────────────────────
 
-    return jsonEncode({
-      'date': DateTime(date.year, date.month, date.day).toIso8601String(),
-      'automations': jsonList,
-    });
-  }
-
-  // Calculate overlapping automations and their layout positions
-  // Returns a map of automation ID to their column index and total columns
-  Map<String, AutomationLayout> calculateAutomationLayouts(List<Automation> automations) {
+  Map<String, AutomationLayout> calculateAutomationLayouts(
+      List<Automation> automations) {
     if (automations.isEmpty) return {};
 
-    // Sort by start time, then by duration (longer first)
     final sorted = List<Automation>.from(automations)
       ..sort((a, b) {
-        final startCompare = a.startMinutes.compareTo(b.startMinutes);
-        if (startCompare != 0) return startCompare;
-        return b.durationMinutes.compareTo(a.durationMinutes);
+        final sc = a.startMinutes.compareTo(b.startMinutes);
+        return sc != 0 ? sc : b.durationMinutes.compareTo(a.durationMinutes);
       });
 
-    final Map<String, AutomationLayout> layouts = {};
     final List<List<Automation>> columns = [];
-
     for (final automation in sorted) {
       bool placed = false;
-
-      // Try to place in existing columns
-      for (int i = 0; i < columns.length; i++) {
-        if (!_overlapsWithAny(automation, columns[i])) {
-          columns[i].add(automation);
+      for (final col in columns) {
+        if (!_overlapsAny(automation, col)) {
+          col.add(automation);
           placed = true;
           break;
         }
       }
-
-      // If couldn't place in existing columns, create new column
-      if (!placed) {
-        columns.add([automation]);
-      }
+      if (!placed) columns.add([automation]);
     }
 
-    // Assign layout info to each automation
-    for (int colIndex = 0; colIndex < columns.length; colIndex++) {
-      for (final automation in columns[colIndex]) {
-        layouts[automation.id] = AutomationLayout(
-          columnIndex: colIndex,
-          totalColumns: columns.length,
-        );
+    final Map<String, AutomationLayout> layouts = {};
+    for (int ci = 0; ci < columns.length; ci++) {
+      for (final a in columns[ci]) {
+        layouts[a.id] = AutomationLayout(columnIndex: ci, totalColumns: columns.length);
       }
     }
-
     return layouts;
   }
 
-  // Check if an automation overlaps with any in a list
-  bool _overlapsWithAny(Automation automation, List<Automation> others) {
-    for (final other in others) {
-      if (_overlaps(automation, other)) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  // Check if two automations overlap in time
-  bool _overlaps(Automation a, Automation b) {
-    return a.startMinutes < b.endMinutes && b.startMinutes < a.endMinutes;
-  }
+  bool _overlapsAny(Automation a, List<Automation> others) =>
+      others.any((o) => a.startMinutes < o.endMinutes && o.startMinutes < a.endMinutes);
 }
 
-// Helper class to store layout information for automations
 class AutomationLayout {
   final int columnIndex;
   final int totalColumns;
-
-  AutomationLayout({
-    required this.columnIndex,
-    required this.totalColumns,
-  });
+  const AutomationLayout({required this.columnIndex, required this.totalColumns});
 }

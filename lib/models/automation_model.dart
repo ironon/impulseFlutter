@@ -1,73 +1,136 @@
 import 'package:flutter/material.dart';
 
-enum RecurrenceType {
-  once,
-  daily,
-  weekly,
+// ── Enumerations (match firmware spec exactly) ──────────────────────────────
+
+enum RecurrenceType { once, daily, weekly, monthly }
+
+enum Criteria { getAway, stayNear, getOffWifi, getOnWifi }
+
+enum EnforcementProfile {
+  strictSilent,
+  normalSilent,
+  looseSilent,
+  strictBoth,
+  normalBoth,
+  looseBoth,
+  strictBuzz,
+  normalBuzz,
+  looseBuzz,
 }
 
-enum Criteria {
-  getAway,
-  stayNear,
+enum AnchorEnforcementProfile { light, medium, hard }
+
+// Human-readable labels for the UI
+extension EnforcementProfileLabel on EnforcementProfile {
+  String get label {
+    switch (this) {
+      case EnforcementProfile.strictSilent: return 'Strict – Vibrate only';
+      case EnforcementProfile.normalSilent: return 'Normal – Vibrate only';
+      case EnforcementProfile.looseSilent:  return 'Loose – Vibrate only';
+      case EnforcementProfile.strictBoth:   return 'Strict – Buzz + Vibrate';
+      case EnforcementProfile.normalBoth:   return 'Normal – Buzz + Vibrate';
+      case EnforcementProfile.looseBoth:    return 'Loose – Buzz + Vibrate';
+      case EnforcementProfile.strictBuzz:   return 'Strict – Buzz only';
+      case EnforcementProfile.normalBuzz:   return 'Normal – Buzz only';
+      case EnforcementProfile.looseBuzz:    return 'Loose – Buzz only';
+    }
+  }
 }
 
-enum Importance {
-  low,
-  medium,
-  high,
+extension AnchorProfileLabel on AnchorEnforcementProfile {
+  String get label {
+    switch (this) {
+      case AnchorEnforcementProfile.light:  return 'Light (3s beep / 60s pause)';
+      case AnchorEnforcementProfile.medium: return 'Medium (3s beep / 30s pause)';
+      case AnchorEnforcementProfile.hard:   return 'Hard (4s beep / 10s pause)';
+    }
+  }
 }
+
+// ── Event / Automation model ─────────────────────────────────────────────────
 
 class Automation {
+  /// UUID v4 identifying this event.
   final String id;
-  final DateTime date; // For 'once' type, the specific date. For recurring, the reference date
+
+  /// Reference date (UTC).
+  /// For `once`: the specific calendar date.
+  /// For recurring: the anchor date from which recurrence is computed.
+  final DateTime referenceDate;
+
   final TimeOfDay startTime;
   final TimeOfDay endTime;
   final RecurrenceType recurrenceType;
-  final int? dayOfWeek; // 1-7 for Monday-Sunday, only used for weekly recurrence
-  final String deviceId;
-  final Criteria criteria;
-  final Color color;
-  final bool strictMode;
-  final Importance importance;
 
-  Automation({
+  /// 1–7 (Mon–Sun). Non-null only when [recurrenceType] == weekly.
+  final int? dayOfWeek;
+
+  /// 1–31. Non-null only when [recurrenceType] == monthly.
+  final int? dayOfMonth;
+
+  final Criteria criteria;
+  final EnforcementProfile profile;
+  final bool negate;
+
+  /// UUID of the target anchor. Non-null for getAway / stayNear.
+  final String? anchorId;
+
+  /// Target WiFi network name. Non-null for getOnWifi / getOffWifi.
+  final String? wifiSSID;
+
+  /// UUIDs of anchors that should beep when the watch is removed.
+  final List<String> beepAnchors;
+
+  /// Required when [beepAnchors] is non-empty.
+  final AnchorEnforcementProfile? anchorProfile;
+
+  // ── UI-only ──
+  final Color color;
+
+  const Automation({
     required this.id,
-    required this.date,
+    required this.referenceDate,
     required this.startTime,
     required this.endTime,
     required this.recurrenceType,
     this.dayOfWeek,
-    required this.deviceId,
+    this.dayOfMonth,
     required this.criteria,
+    required this.profile,
+    this.negate = false,
+    this.anchorId,
+    this.wifiSSID,
+    this.beepAnchors = const [],
+    this.anchorProfile,
     required this.color,
-    required this.strictMode,
-    required this.importance,
   });
 
-  // Convert to JSON for storage
-  Map<String, dynamic> toJson() {
-    return {
-      'id': id,
-      'date': date.toIso8601String(),
-      'startTimeHour': startTime.hour,
-      'startTimeMinute': startTime.minute,
-      'endTimeHour': endTime.hour,
-      'endTimeMinute': endTime.minute,
-      'recurrenceType': recurrenceType.name,
-      'dayOfWeek': dayOfWeek,
-      'deviceId': deviceId,
-      'criteria': criteria.name,
-      'colorValue': color.toARGB32(),
-      'strictMode': strictMode,
-      'importance': importance.name,
-    };
-  }
+  // ── JSON serialisation ────────────────────────────────────────────────────
 
-  // Create from JSON
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'referenceDate': referenceDate.toIso8601String(),
+        'startTimeHour': startTime.hour,
+        'startTimeMinute': startTime.minute,
+        'endTimeHour': endTime.hour,
+        'endTimeMinute': endTime.minute,
+        'recurrenceType': recurrenceType.name,
+        'dayOfWeek': dayOfWeek,
+        'dayOfMonth': dayOfMonth,
+        'criteria': criteria.name,
+        'profile': profile.name,
+        'negate': negate,
+        'anchorId': anchorId,
+        'wifiSSID': wifiSSID,
+        'beepAnchors': beepAnchors,
+        'anchorProfile': anchorProfile?.name,
+        'colorValue': color.toARGB32(),
+      };
+
   factory Automation.fromJson(Map<String, dynamic> json) {
     return Automation(
       id: json['id'] as String,
-      date: DateTime.parse(json['date'] as String),
+      referenceDate: DateTime.parse(json['referenceDate'] as String),
       startTime: TimeOfDay(
         hour: json['startTimeHour'] as int,
         minute: json['startTimeMinute'] as int,
@@ -80,78 +143,90 @@ class Automation {
         (e) => e.name == json['recurrenceType'],
       ),
       dayOfWeek: json['dayOfWeek'] as int?,
-      deviceId: json['deviceId'] as String,
+      dayOfMonth: json['dayOfMonth'] as int?,
       criteria: Criteria.values.firstWhere(
         (e) => e.name == json['criteria'],
       ),
-      color: Color(json['colorValue'] as int),
-      strictMode: json['strictMode'] as bool,
-      importance: Importance.values.firstWhere(
-        (e) => e.name == json['importance'],
+      profile: EnforcementProfile.values.firstWhere(
+        (e) => e.name == (json['profile'] ?? 'normalSilent'),
       ),
+      negate: json['negate'] as bool? ?? false,
+      anchorId: json['anchorId'] as String?,
+      wifiSSID: json['wifiSSID'] as String?,
+      beepAnchors: (json['beepAnchors'] as List<dynamic>?)
+              ?.map((e) => e as String)
+              .toList() ??
+          [],
+      anchorProfile: json['anchorProfile'] == null
+          ? null
+          : AnchorEnforcementProfile.values.firstWhere(
+              (e) => e.name == json['anchorProfile'],
+            ),
+      color: Color(json['colorValue'] as int),
     );
   }
 
-  // Create a copy with updated values
+  // ── copyWith ──────────────────────────────────────────────────────────────
+
   Automation copyWith({
     String? id,
-    DateTime? date,
+    DateTime? referenceDate,
     TimeOfDay? startTime,
     TimeOfDay? endTime,
     RecurrenceType? recurrenceType,
     int? dayOfWeek,
-    String? deviceId,
+    int? dayOfMonth,
     Criteria? criteria,
+    EnforcementProfile? profile,
+    bool? negate,
+    String? anchorId,
+    String? wifiSSID,
+    List<String>? beepAnchors,
+    AnchorEnforcementProfile? anchorProfile,
     Color? color,
-    bool? strictMode,
-    Importance? importance,
   }) {
     return Automation(
       id: id ?? this.id,
-      date: date ?? this.date,
+      referenceDate: referenceDate ?? this.referenceDate,
       startTime: startTime ?? this.startTime,
       endTime: endTime ?? this.endTime,
       recurrenceType: recurrenceType ?? this.recurrenceType,
       dayOfWeek: dayOfWeek ?? this.dayOfWeek,
-      deviceId: deviceId ?? this.deviceId,
+      dayOfMonth: dayOfMonth ?? this.dayOfMonth,
       criteria: criteria ?? this.criteria,
+      profile: profile ?? this.profile,
+      negate: negate ?? this.negate,
+      anchorId: anchorId ?? this.anchorId,
+      wifiSSID: wifiSSID ?? this.wifiSSID,
+      beepAnchors: beepAnchors ?? this.beepAnchors,
+      anchorProfile: anchorProfile ?? this.anchorProfile,
       color: color ?? this.color,
-      strictMode: strictMode ?? this.strictMode,
-      importance: importance ?? this.importance,
     );
   }
 
-  // Check if this automation should appear on a given date
+  // ── Date matching ─────────────────────────────────────────────────────────
+
   bool appearsOnDate(DateTime date) {
-    final normalizedDate = DateTime(date.year, date.month, date.day);
-    final normalizedAutomationDate = DateTime(
-      this.date.year,
-      this.date.month,
-      this.date.day,
-    );
+    final d = DateTime(date.year, date.month, date.day);
+    final ref = DateTime(referenceDate.year, referenceDate.month, referenceDate.day);
 
     switch (recurrenceType) {
       case RecurrenceType.once:
-        return normalizedDate == normalizedAutomationDate;
+        return d == ref;
       case RecurrenceType.daily:
-        // Appears on all dates on or after the start date
-        return normalizedDate.isAfter(normalizedAutomationDate) ||
-            normalizedDate == normalizedAutomationDate;
+        return !d.isBefore(ref);
       case RecurrenceType.weekly:
         if (dayOfWeek == null) return false;
-        // Check if the date is on the correct day of week and after/on start date
-        return date.weekday == dayOfWeek &&
-            (normalizedDate.isAfter(normalizedAutomationDate) ||
-                normalizedDate == normalizedAutomationDate);
+        return date.weekday == dayOfWeek && !d.isBefore(ref);
+      case RecurrenceType.monthly:
+        if (dayOfMonth == null) return false;
+        return date.day == dayOfMonth && !d.isBefore(ref);
     }
   }
 
-  // Get start time in minutes since midnight
+  // ── Computed time helpers ─────────────────────────────────────────────────
+
   int get startMinutes => startTime.hour * 60 + startTime.minute;
-
-  // Get end time in minutes since midnight
-  int get endMinutes => endTime.hour * 60 + endTime.minute;
-
-  // Get duration in minutes
+  int get endMinutes   => endTime.hour * 60 + endTime.minute;
   int get durationMinutes => endMinutes - startMinutes;
 }
