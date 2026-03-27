@@ -8,6 +8,7 @@ import '../models/automation_model.dart';
 import '../models/bluetooth_device_model.dart';
 import '../utils/ble_constants.dart';
 import '../utils/schedule_encoder.dart';
+import 'debug_log_service.dart';
 
 // ── WatchStatus model ────────────────────────────────────────────────────────
 
@@ -186,26 +187,61 @@ class WatchService {
   }
 
   Future<void> _subscribeNotifications() async {
+    final dbg = DebugLogService();
+
     if (_statusChar != null) {
       await _statusChar!.setNotifyValue(true);
       _statusSub = _statusChar!.onValueReceived.listen((bytes) {
-        _statusController.add(WatchStatus.fromBytes(bytes));
+        final status = WatchStatus.fromBytes(bytes);
+        _statusController.add(status);
+        dbg.log(
+          'status',
+          'state=${status.activityLabel}  bt=${status.btConnected}  '
+          'wifi=${status.wifiConnected}  worn=${status.worn}  '
+          'batt=${status.batteryPct == 0xFF ? "n/a" : "${status.batteryPct}%"}  '
+          'event=${status.activeEventId?.substring(0, 8) ?? "none"}',
+          bytes,
+        );
       });
-      // Read current value immediately
       try {
         final val = await _statusChar!.read();
-        if (val.isNotEmpty) _statusController.add(WatchStatus.fromBytes(val));
+        if (val.isNotEmpty) {
+          final status = WatchStatus.fromBytes(val);
+          _statusController.add(status);
+          dbg.log(
+            'status (read)',
+            'state=${status.activityLabel}  bt=${status.btConnected}  '
+            'wifi=${status.wifiConnected}  worn=${status.worn}  '
+            'batt=${status.batteryPct == 0xFF ? "n/a" : "${status.batteryPct}%"}  '
+            'event=${status.activeEventId?.substring(0, 8) ?? "none"}',
+            val,
+          );
+        }
       } catch (_) {}
     }
 
     if (_seenAnchorsChar != null) {
       await _seenAnchorsChar!.setNotifyValue(true);
       _seenAnchorsSub = _seenAnchorsChar!.onValueReceived.listen((bytes) {
-        _seenAnchorsController.add(_parseSeenAnchors(bytes));
+        final anchors = _parseSeenAnchors(bytes);
+        _seenAnchorsController.add(anchors);
+        final summary = anchors.isEmpty
+            ? 'count=0'
+            : anchors.map((a) =>
+                '${a.uuid.substring(0, 8)}… rssi=${a.rssi}').join(', ');
+        dbg.log('seen_anchors', 'count=${anchors.length}  $summary', bytes);
       });
       try {
         final val = await _seenAnchorsChar!.read();
-        if (val.isNotEmpty) _seenAnchorsController.add(_parseSeenAnchors(val));
+        if (val.isNotEmpty) {
+          final anchors = _parseSeenAnchors(val);
+          _seenAnchorsController.add(anchors);
+          final summary = anchors.isEmpty
+              ? 'count=0'
+              : anchors.map((a) =>
+                  '${a.uuid.substring(0, 8)}… rssi=${a.rssi}').join(', ');
+          dbg.log('seen_anchors (read)', 'count=${anchors.length}  $summary', val);
+        }
       } catch (_) {}
     }
   }

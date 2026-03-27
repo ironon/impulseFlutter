@@ -3,6 +3,7 @@ import 'theme/app_theme.dart';
 import 'screens/devices_screen.dart';
 import 'screens/automations_screen.dart';
 import 'screens/settings_screen.dart';
+import 'screens/debug_screen.dart';
 
 void main() {
   runApp(const ImpulseApp());
@@ -36,6 +37,7 @@ class _MainScreenState extends State<MainScreen> {
     const DevicesScreen(),
     const AutomationsScreen(),
     const SettingsScreen(),
+    const DebugScreen(),
   ];
 
   @override
@@ -61,6 +63,10 @@ class _MainScreenState extends State<MainScreen> {
           BottomNavigationBarItem(
             icon: Icon(Icons.settings),
             label: 'Settings',
+          ),
+          BottomNavigationBarItem(
+            icon: Icon(Icons.bug_report_outlined),
+            label: 'Debug',
           ),
         ],
       ),
