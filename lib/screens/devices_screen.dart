@@ -8,7 +8,6 @@ import '../services/bluetooth_service.dart';
 import '../services/watch_service.dart';
 import '../services/automation_service.dart';
 import '../theme/app_theme.dart';
-import '../utils/ble_constants.dart';
 
 class DevicesScreen extends StatefulWidget {
   const DevicesScreen({super.key});
@@ -59,15 +58,14 @@ class _DevicesScreenState extends State<DevicesScreen> {
       (results) {
         for (final r in results) {
           final type = _btService.classifyDevice(r);
-          final bleRemoteId = r.device.remoteId.toString();
-          final advertisedUuid = (type == DeviceType.anchor)
-              ? _btService.extractAnchorUuid(r)
-              : null;
+          // For anchors, use the UUID from iBeacon data as the device ID
+          final id = (type == DeviceType.anchor)
+              ? (_btService.extractAnchorUuid(r) ??
+                 r.device.remoteId.toString())
+              : r.device.remoteId.toString();
 
           final device = BluetoothDeviceModel(
-            // Use advertised iBeacon UUID if available, otherwise temporary
-            // bleRemoteId. _fetchAnchorUuid will correct it after the scan.
-            id:          advertisedUuid ?? bleRemoteId,
+            id:          id,
             name:        r.device.platformName.isNotEmpty
                            ? r.device.platformName
                            : (type == DeviceType.anchor ? 'Anchor' : 'Impulse Watch'),
@@ -75,16 +73,9 @@ class _DevicesScreenState extends State<DevicesScreen> {
             rssi:        r.rssi,
             lastSeen:    DateTime.now(),
             deviceType:  type,
-            bleRemoteId: bleRemoteId,
+            bleRemoteId: r.device.remoteId.toString(),
           );
           _btService.addOrUpdateDevice(device);
-
-          // If we couldn't extract the iBeacon UUID from the advertisement
-          // (common on iOS where Apple manufacturer data is stripped and scan
-          // response service data has no space), fetch it via GATT.
-          if (type == DeviceType.anchor && advertisedUuid == null) {
-            _fetchAnchorUuid(r.device);
-          }
         }
         if (mounted) setState(() {});
       },
@@ -102,53 +93,6 @@ class _DevicesScreenState extends State<DevicesScreen> {
       _btService.stopScan();
       if (mounted) setState(() => _isScanning = false);
     });
-  }
-
-  // ── Anchor UUID fetch ─────────────────────────────────────────────────────
-
-  /// Connects to an anchor, reads its UUID characteristic, then updates the
-  /// stored device so its id is the correct iBeacon UUID rather than the
-  /// temporary BLE remote ID assigned by the OS.
-  Future<void> _fetchAnchorUuid(fbp.BluetoothDevice device) async {
-    try {
-      await device.connect(timeout: const Duration(seconds: 8));
-      final services = await device.discoverServices();
-      for (final svc in services) {
-        if (svc.serviceUuid.str.toLowerCase() != BleConstants.anchorServiceUuid) continue;
-        for (final char in svc.characteristics) {
-          if (char.characteristicUuid.str.toLowerCase() != BleConstants.anchorUuidCharUuid) continue;
-          final bytes = await char.read();
-          if (bytes.length >= 16) {
-            final iBeaconUuid = _bytesToUuidStr(bytes.sublist(0, 16));
-            final bleRemoteId = device.remoteId.toString();
-            // Remove the temporary entry keyed by bleRemoteId and replace with
-            // the correct iBeacon UUID, preserving bleRemoteId for connecting.
-            final existing = _btService.deviceHistory
-                .where((d) => d.bleRemoteId == bleRemoteId)
-                .firstOrNull;
-            if (existing != null) {
-              await _btService.removeDevice(existing.id);
-              await _btService.addOrUpdateDevice(existing.copyWith(id: iBeaconUuid));
-              if (mounted) setState(() {});
-            }
-          }
-          break;
-        }
-        break;
-      }
-    } catch (_) {
-      // Fetch is best-effort; anchor will still appear via watch SeenAnchors
-    } finally {
-      try { await device.disconnect(); } catch (_) {}
-    }
-  }
-
-  String _bytesToUuidStr(List<int> b) {
-    String h(int s, int e) => b
-        .sublist(s, e)
-        .map((v) => v.toRadixString(16).padLeft(2, '0'))
-        .join();
-    return '${h(0,4)}-${h(4,6)}-${h(6,8)}-${h(8,10)}-${h(10,16)}';
   }
 
   // ── Watch connection ──────────────────────────────────────────────────────

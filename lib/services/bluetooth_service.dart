@@ -45,11 +45,6 @@ class BluetoothService {
     );
   }
 
-  Future<void> removeDevice(String id) async {
-    _deviceHistory.removeWhere((d) => d.id == id);
-    await _saveDeviceHistory();
-  }
-
   Future<void> addOrUpdateDevice(BluetoothDeviceModel device) async {
     final idx = _deviceHistory.indexWhere((d) => d.id == device.id);
     if (idx != -1) {

@@ -7,7 +7,6 @@ class BleConstants {
   static const String anchorSettingsCharUuid   = '4a0f0004-f8ce-11ee-8001-020304050607';
   static const String anchorSchedCtrlCharUuid  = '4a0f0005-f8ce-11ee-8001-020304050607';
   static const String anchorSchedDataCharUuid  = '4a0f0006-f8ce-11ee-8001-020304050607';
-  static const String anchorUuidCharUuid       = '4a0f0007-f8ce-11ee-8001-020304050607';
 
   // ── Watch ─────────────────────────────────────────────────────────────────
   static const String watchServiceUuid         = '4a0f0010-f8ce-11ee-8001-020304050607';
