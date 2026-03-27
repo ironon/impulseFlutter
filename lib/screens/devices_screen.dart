@@ -26,8 +26,7 @@ class _DevicesScreenState extends State<DevicesScreen> {
   String? _statusMsg;
 
   WatchStatus? _watchStatus;
-  StreamSubscription<WatchStatus>?        _statusSub;
-  StreamSubscription<List<SeenAnchorInfo>>? _seenAnchorsSub;
+  StreamSubscription<WatchStatus>? _statusSub;
 
   @override
   void initState() {
@@ -41,26 +40,12 @@ class _DevicesScreenState extends State<DevicesScreen> {
     _statusSub = _watchService.statusStream.listen((s) {
       if (mounted) setState(() => _watchStatus = s);
     });
-    _seenAnchorsSub = _watchService.seenAnchorsStream.listen((anchors) {
-      for (final a in anchors) {
-        _btService.addOrUpdateDevice(BluetoothDeviceModel(
-          id:         a.uuid,
-          name:       'Anchor',
-          isConnected: false,
-          rssi:       a.rssi,
-          lastSeen:   a.lastSeen,
-          deviceType: DeviceType.anchor,
-        ));
-      }
-      if (mounted) setState(() {});
-    });
     setState(() {});
   }
 
   @override
   void dispose() {
     _statusSub?.cancel();
-    _seenAnchorsSub?.cancel();
     super.dispose();
   }
 
@@ -88,6 +73,7 @@ class _DevicesScreenState extends State<DevicesScreen> {
             rssi:        r.rssi,
             lastSeen:    DateTime.now(),
             deviceType:  type,
+            bleRemoteId: r.device.remoteId.toString(),
           );
           _btService.addOrUpdateDevice(device);
         }
@@ -158,9 +144,15 @@ class _DevicesScreenState extends State<DevicesScreen> {
   // ── Anchor identify ───────────────────────────────────────────────────────
 
   Future<void> _identifyAnchor(BluetoothDeviceModel anchor) async {
+    if (anchor.bleRemoteId == null) {
+      setState(() => _statusMsg =
+          'Cannot identify — anchor was found via watch, not a direct scan. '
+          'Tap refresh to scan for it directly.');
+      return;
+    }
     setState(() => _statusMsg = 'Connecting to anchor…');
     try {
-      final fbpDevice = fbp.BluetoothDevice.fromId(anchor.id);
+      final fbpDevice = fbp.BluetoothDevice.fromId(anchor.bleRemoteId!);
       await fbpDevice.connect(timeout: const Duration(seconds: 8));
       final services = await fbpDevice.discoverServices();
       for (final svc in services) {

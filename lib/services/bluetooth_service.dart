@@ -108,13 +108,12 @@ class BluetoothService {
 
   /// Infers the device type from advertisement data.
   DeviceType classifyDevice(fbp.ScanResult result) {
-    // Watch advertises with its service UUID
     for (final svcUuid in result.advertisementData.serviceUuids) {
-      if (svcUuid.str.toLowerCase() == BleConstants.watchServiceUuid) {
-        return DeviceType.watch;
-      }
+      final u = svcUuid.str.toLowerCase();
+      if (u == BleConstants.watchServiceUuid)  return DeviceType.watch;
+      if (u == BleConstants.anchorServiceUuid) return DeviceType.anchor;
     }
-    // Anchor advertises as iBeacon (Apple manufacturer data 0x004C)
+    // Fallback: iBeacon manufacturer data (visible on Android, stripped on iOS)
     final mfr = result.advertisementData.manufacturerData;
     if (mfr.containsKey(0x004C)) {
       final data = mfr[0x004C]!;
@@ -127,20 +126,32 @@ class BluetoothService {
     return DeviceType.unknown;
   }
 
-  /// Extracts the anchor UUID from an iBeacon advertisement.
-  /// Returns null if this is not a valid iBeacon.
+  /// Extracts the anchor's iBeacon UUID from a scan result.
+  /// Checks service data first (scan response, works on iOS), then falls back
+  /// to iBeacon manufacturer data (works on Android).
   String? extractAnchorUuid(fbp.ScanResult result) {
+    // Primary: service data payload in the scan response (16 raw UUID bytes)
+    final svcData = result.advertisementData.serviceData;
+    for (final entry in svcData.entries) {
+      if (entry.key.str.toLowerCase() == BleConstants.anchorServiceUuid &&
+          entry.value.length >= 16) {
+        return _bytesToUuidStr(entry.value.sublist(0, 16));
+      }
+    }
+    // Fallback: iBeacon manufacturer data
     final mfr = result.advertisementData.manufacturerData;
     if (!mfr.containsKey(0x004C)) return null;
     final data = mfr[0x004C]!;
     if (data.length < 23 ||
         data[0] != BleConstants.iBeaconType ||
         data[1] != BleConstants.iBeaconLength) { return null; }
-    // UUID starts at offset 2 in the payload (after type + length bytes)
-    final uuidBytes = data.sublist(2, 18);
-    String h(int s, int e) => uuidBytes
+    return _bytesToUuidStr(data.sublist(2, 18));
+  }
+
+  String _bytesToUuidStr(List<int> b) {
+    String h(int s, int e) => b
         .sublist(s, e)
-        .map((b) => b.toRadixString(16).padLeft(2, '0'))
+        .map((v) => v.toRadixString(16).padLeft(2, '0'))
         .join();
     return '${h(0,4)}-${h(4,6)}-${h(6,8)}-${h(8,10)}-${h(10,16)}';
   }

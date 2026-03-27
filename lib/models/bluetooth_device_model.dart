@@ -12,6 +12,11 @@ class BluetoothDeviceModel {
   final String? ipAddress;
   final DateTime? ipLastUpdated;
 
+  /// BLE remote ID (MAC on Android, CoreBluetooth UUID on iOS).
+  /// Set when the phone directly scanned the device. Null if discovered
+  /// only via the watch's SeenAnchors characteristic.
+  final String? bleRemoteId;
+
   const BluetoothDeviceModel({
     required this.id,
     required this.name,
@@ -21,6 +26,7 @@ class BluetoothDeviceModel {
     this.deviceType = DeviceType.unknown,
     this.ipAddress,
     this.ipLastUpdated,
+    this.bleRemoteId,
   });
 
   Map<String, dynamic> toJson() => {
@@ -32,6 +38,7 @@ class BluetoothDeviceModel {
         'deviceType': deviceType.name,
         'ipAddress': ipAddress,
         'ipLastUpdated': ipLastUpdated?.toIso8601String(),
+        'bleRemoteId': bleRemoteId,
       };
 
   factory BluetoothDeviceModel.fromJson(Map<String, dynamic> json) {
@@ -49,6 +56,7 @@ class BluetoothDeviceModel {
       ipLastUpdated: json['ipLastUpdated'] == null
           ? null
           : DateTime.parse(json['ipLastUpdated'] as String),
+      bleRemoteId: json['bleRemoteId'] as String?,
     );
   }
 
@@ -61,6 +69,7 @@ class BluetoothDeviceModel {
     DeviceType? deviceType,
     String? ipAddress,
     DateTime? ipLastUpdated,
+    String? bleRemoteId,
   }) {
     return BluetoothDeviceModel(
       id: id ?? this.id,
@@ -71,6 +80,7 @@ class BluetoothDeviceModel {
       deviceType: deviceType ?? this.deviceType,
       ipAddress: ipAddress ?? this.ipAddress,
       ipLastUpdated: ipLastUpdated ?? this.ipLastUpdated,
+      bleRemoteId: bleRemoteId ?? this.bleRemoteId,
     );
   }
 }

@@ -1,5 +1,10 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'theme/app_theme.dart';
+import 'models/bluetooth_device_model.dart';
+import 'services/bluetooth_service.dart';
+import 'services/watch_service.dart';
 import 'screens/devices_screen.dart';
 import 'screens/automations_screen.dart';
 import 'screens/settings_screen.dart';
@@ -32,6 +37,10 @@ class MainScreen extends StatefulWidget {
 
 class _MainScreenState extends State<MainScreen> {
   int _currentIndex = 0;
+  StreamSubscription<List<SeenAnchorInfo>>? _seenAnchorsSub;
+
+  final _btService    = BluetoothService();
+  final _watchService = WatchService();
 
   final List<Widget> _screens = [
     const DevicesScreen(),
@@ -39,6 +48,30 @@ class _MainScreenState extends State<MainScreen> {
     const SettingsScreen(),
     const DebugScreen(),
   ];
+
+  @override
+  void initState() {
+    super.initState();
+    _seenAnchorsSub = _watchService.seenAnchorsStream.listen((anchors) {
+      for (final a in anchors) {
+        _btService.addOrUpdateDevice(BluetoothDeviceModel(
+          id:          a.uuid,
+          name:        'Anchor',
+          isConnected: false,
+          rssi:        a.rssi,
+          lastSeen:    a.lastSeen,
+          deviceType:  DeviceType.anchor,
+        ));
+      }
+      if (mounted) setState(() {});
+    });
+  }
+
+  @override
+  void dispose() {
+    _seenAnchorsSub?.cancel();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
