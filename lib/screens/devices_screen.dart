@@ -26,7 +26,8 @@ class _DevicesScreenState extends State<DevicesScreen> {
   String? _statusMsg;
 
   WatchStatus? _watchStatus;
-  StreamSubscription<WatchStatus>? _statusSub;
+  StreamSubscription<WatchStatus>?        _statusSub;
+  StreamSubscription<List<SeenAnchorInfo>>? _seenAnchorsSub;
 
   @override
   void initState() {
@@ -40,12 +41,26 @@ class _DevicesScreenState extends State<DevicesScreen> {
     _statusSub = _watchService.statusStream.listen((s) {
       if (mounted) setState(() => _watchStatus = s);
     });
+    _seenAnchorsSub = _watchService.seenAnchorsStream.listen((anchors) {
+      for (final a in anchors) {
+        _btService.addOrUpdateDevice(BluetoothDeviceModel(
+          id:         a.uuid,
+          name:       'Anchor',
+          isConnected: false,
+          rssi:       a.rssi,
+          lastSeen:   a.lastSeen,
+          deviceType: DeviceType.anchor,
+        ));
+      }
+      if (mounted) setState(() {});
+    });
     setState(() {});
   }
 
   @override
   void dispose() {
     _statusSub?.cancel();
+    _seenAnchorsSub?.cancel();
     super.dispose();
   }
 
