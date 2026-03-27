@@ -113,10 +113,10 @@ class BluetoothService {
       if (u == BleConstants.watchServiceUuid)  return DeviceType.watch;
       if (u == BleConstants.anchorServiceUuid) return DeviceType.anchor;
     }
-    // Fallback: iBeacon manufacturer data (visible on Android, stripped on iOS)
+    // Fallback: Impulse custom manufacturer data (company ID 0xFFFF, visible on all platforms)
     final mfr = result.advertisementData.manufacturerData;
-    if (mfr.containsKey(0x004C)) {
-      final data = mfr[0x004C]!;
+    if (mfr.containsKey(0xFFFF)) {
+      final data = mfr[0xFFFF]!;
       if (data.length >= 23 &&
           data[0] == BleConstants.iBeaconType &&
           data[1] == BleConstants.iBeaconLength) {
@@ -126,22 +126,13 @@ class BluetoothService {
     return DeviceType.unknown;
   }
 
-  /// Extracts the anchor's iBeacon UUID from a scan result.
-  /// Checks service data first (scan response, works on iOS), then falls back
-  /// to iBeacon manufacturer data (works on Android).
+  /// Extracts the anchor's UUID from a scan result.
+  /// Reads from Impulse custom manufacturer data (company ID 0xFFFF), which
+  /// is visible on both iOS and Android (unlike Apple 0x004C which iOS strips).
   String? extractAnchorUuid(fbp.ScanResult result) {
-    // Primary: service data payload in the scan response (16 raw UUID bytes)
-    final svcData = result.advertisementData.serviceData;
-    for (final entry in svcData.entries) {
-      if (entry.key.str.toLowerCase() == BleConstants.anchorServiceUuid &&
-          entry.value.length >= 16) {
-        return _bytesToUuidStr(entry.value.sublist(0, 16));
-      }
-    }
-    // Fallback: iBeacon manufacturer data
     final mfr = result.advertisementData.manufacturerData;
-    if (!mfr.containsKey(0x004C)) return null;
-    final data = mfr[0x004C]!;
+    if (!mfr.containsKey(0xFFFF)) return null;
+    final data = mfr[0xFFFF]!;
     if (data.length < 23 ||
         data[0] != BleConstants.iBeaconType ||
         data[1] != BleConstants.iBeaconLength) { return null; }

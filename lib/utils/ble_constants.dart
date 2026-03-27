@@ -18,9 +18,10 @@ class BleConstants {
   static const String watchStatusCharUuid      = '4a0f0016-f8ce-11ee-8001-020304050607';
   static const String watchAnchorIpCharUuid    = '4a0f0017-f8ce-11ee-8001-020304050607';
 
-  // ── iBeacon ───────────────────────────────────────────────────────────────
-  static const int iBeaconAppleCompanyIdLsb = 0x4C;
-  static const int iBeaconAppleCompanyIdMsb = 0x00;
-  static const int iBeaconType   = 0x02;
-  static const int iBeaconLength = 0x15;
+  // ── Manufacturer data ─────────────────────────────────────────────────────
+  // Custom company ID (0xFFFF) used in place of Apple's 0x004C so that iOS
+  // passes the manufacturer data through to third-party apps.
+  static const int impulseCompanyId = 0xFFFF;
+  static const int iBeaconType      = 0x02;
+  static const int iBeaconLength    = 0x15;
 }
