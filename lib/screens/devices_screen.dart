@@ -8,6 +8,7 @@ import '../services/bluetooth_service.dart';
 import '../services/watch_service.dart';
 import '../services/automation_service.dart';
 import '../theme/app_theme.dart';
+import '../widgets/device_settings_modal.dart';
 
 class DevicesScreen extends StatefulWidget {
   const DevicesScreen({super.key});
@@ -336,6 +337,25 @@ class _DevicesScreenState extends State<DevicesScreen> {
                         ),
                         child: const Text('Connect'),
                       ),
+                IconButton(
+                  icon: const Icon(Icons.settings_outlined,
+                      color: AppTheme.textGrey),
+                  tooltip: 'Device settings',
+                  onPressed: () async {
+                    await showModalBottomSheet(
+                      context: context,
+                      isScrollControlled: true,
+                      backgroundColor: AppTheme.cardGrey,
+                      shape: const RoundedRectangleBorder(
+                        borderRadius: BorderRadius.vertical(
+                            top: Radius.circular(16)),
+                      ),
+                      builder: (_) =>
+                          DeviceSettingsModal(device: watch),
+                    );
+                    if (mounted) setState(() {});
+                  },
+                ),
               ],
             ),
 
@@ -402,11 +422,35 @@ class _DevicesScreenState extends State<DevicesScreen> {
                   style: const TextStyle(color: AppTheme.textGrey, fontSize: 12)),
           ],
         ),
-        trailing: IconButton(
-          icon: const Icon(Icons.notifications_active_outlined,
-              color: AppTheme.lightOrange),
-          tooltip: 'Identify (beep)',
-          onPressed: () => _identifyAnchor(anchor),
+        trailing: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            IconButton(
+              icon: const Icon(Icons.notifications_active_outlined,
+                  color: AppTheme.lightOrange),
+              tooltip: 'Identify (beep)',
+              onPressed: () => _identifyAnchor(anchor),
+            ),
+            IconButton(
+              icon: const Icon(Icons.settings_outlined,
+                  color: AppTheme.textGrey),
+              tooltip: 'Device settings',
+              onPressed: () async {
+                await showModalBottomSheet(
+                  context: context,
+                  isScrollControlled: true,
+                  backgroundColor: AppTheme.cardGrey,
+                  shape: const RoundedRectangleBorder(
+                    borderRadius: BorderRadius.vertical(
+                        top: Radius.circular(16)),
+                  ),
+                  builder: (_) =>
+                      DeviceSettingsModal(device: anchor),
+                );
+                if (mounted) setState(() {});
+              },
+            ),
+          ],
         ),
       ),
     );
