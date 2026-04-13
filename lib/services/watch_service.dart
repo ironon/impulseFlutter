@@ -42,7 +42,7 @@ class WatchStatus {
   }
 
   static WatchStatus fromBytes(List<int> bytes) {
-    if (bytes.length < 21) {
+    if (bytes.length < 22) {
       return const WatchStatus(
         activityState: 0,
         btConnected: false,
@@ -55,10 +55,11 @@ class WatchStatus {
     final btConn      = bytes[1] != 0;
     final wifiConn    = bytes[2] != 0;
     final worn        = bytes[3] != 0;
-    final batt        = bytes[4];
+    // Battery is now uint16 little-endian at bytes[4..5]
+    final batt        = bytes[4] | (bytes[5] << 8);
 
-    // Active event UUID (16 bytes at offset 5)
-    final eventBytes  = bytes.sublist(5, 21);
+    // Active event UUID (16 bytes at offset 6)
+    final eventBytes  = bytes.sublist(6, 22);
     final allZero     = eventBytes.every((b) => b == 0);
     String? eventId;
     if (!allZero) {
