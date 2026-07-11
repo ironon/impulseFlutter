@@ -8,11 +8,19 @@ class AutomationBlock extends StatelessWidget {
   final AutomationLayout layout;
   final VoidCallback onTap;
 
+  /// True when this commitment has a queued loosening waiting (§8.9 item 5).
+  final bool hasPendingChange;
+
+  /// Honest origin label shown in Advanced mode ("Sunrise Lock" / "manual").
+  final bool showOrigin;
+
   const AutomationBlock({
     super.key,
     required this.automation,
     required this.layout,
     required this.onTap,
+    this.hasPendingChange = false,
+    this.showOrigin = false,
   });
 
   @override
@@ -44,15 +52,24 @@ class AutomationBlock extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(
-                label,
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 12,
-                  fontWeight: FontWeight.bold,
-                ),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      label,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                  if (hasPendingChange)
+                    const Icon(Icons.hourglass_top,
+                        color: Colors.amber, size: 12),
+                ],
               ),
               if (dur > 30) ...[
                 const SizedBox(height: 2),
@@ -69,7 +86,9 @@ class AutomationBlock extends StatelessWidget {
               if (dur > 60) ...[
                 const SizedBox(height: 2),
                 Text(
-                  _criteriaText(),
+                  showOrigin
+                      ? '${_criteriaText()} · ${_originText()}'
+                      : _criteriaText(),
                   style: TextStyle(
                     color: Colors.white.withValues(alpha: 0.8),
                     fontSize: 10,
@@ -107,6 +126,17 @@ class AutomationBlock extends StatelessWidget {
       case Criteria.getOnWifi:  return 'Get on WiFi';
       case Criteria.getOffWifi: return 'Get off WiFi';
       case Criteria.phoneAway:  return 'Phone Away';
+    }
+  }
+
+  /// Honest provenance label (§2A.3): which template made this block.
+  String _originText() {
+    switch (automation.origin) {
+      case TemplateOrigin.manual:      return 'manual';
+      case TemplateOrigin.sunriseLock: return 'Sunrise Lock';
+      case TemplateOrigin.studyTime:   return 'Study Time';
+      case TemplateOrigin.gymTime:     return 'Gym Time';
+      case TemplateOrigin.phoneFree:   return 'Phone-Free';
     }
   }
 

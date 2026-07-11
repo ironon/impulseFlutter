@@ -4,6 +4,16 @@ import '../services/bluetooth_service.dart';
 import '../theme/app_theme.dart';
 import '../utils/schedule_encoder.dart';
 
+/// What the modal hands back: a saved commitment or a delete request.
+class AutomationModalResult {
+  final Automation? saved;
+  final bool deleteRequested;
+  const AutomationModalResult.save(this.saved) : deleteRequested = false;
+  const AutomationModalResult.delete()
+      : saved = null,
+        deleteRequested = true;
+}
+
 class AddAutomationModal extends StatefulWidget {
   final DateTime initialDate;
   final Automation? existingAutomation;
@@ -30,6 +40,7 @@ class _AddAutomationModalState extends State<AddAutomationModal> {
   bool                   _negate         = false;
   String?                _anchorId;
   final _wifiSsidCtrl  = TextEditingController();
+  final _graceCtrl     = TextEditingController(text: '0');
   List<String>           _beepAnchors    = [];
   AnchorEnforcementProfile? _anchorProfile;
   Color                  _color          = Colors.blue;
@@ -57,6 +68,7 @@ class _AddAutomationModalState extends State<AddAutomationModal> {
       _negate         = a.negate;
       _anchorId       = a.anchorId;
       _wifiSsidCtrl.text = a.wifiSSID ?? '';
+      _graceCtrl.text = a.donningGraceS.toString();
       _beepAnchors    = List.from(a.beepAnchors);
       _anchorProfile  = a.anchorProfile;
       _color          = a.color;
@@ -69,6 +81,7 @@ class _AddAutomationModalState extends State<AddAutomationModal> {
   @override
   void dispose() {
     _wifiSsidCtrl.dispose();
+    _graceCtrl.dispose();
     super.dispose();
   }
 
@@ -84,8 +97,12 @@ class _AddAutomationModalState extends State<AddAutomationModal> {
 
   void _save() {
     if (!_canSave) return;
+    final existing = widget.existingAutomation;
+    final grace =
+        (int.tryParse(_graceCtrl.text.trim()) ?? 0).clamp(0, 1800);
     final a = Automation(
-      id:             widget.existingAutomation?.id ?? ScheduleEncoder.generateUuid(),
+      // UUID stability (§8.9 item 3): edits keep the event UUID.
+      id:             existing?.id ?? ScheduleEncoder.generateUuid(),
       referenceDate:  _selectedDate,
       startTime:      _startTime,
       endTime:        _endTime,
@@ -95,13 +112,18 @@ class _AddAutomationModalState extends State<AddAutomationModal> {
       criteria:       _criteria,
       profile:        _profile,
       negate:         _negate,
+      donningGraceS:  grace,
+      // Preserve template provenance; the calling screen decides on detach.
+      origin:             existing?.origin ?? TemplateOrigin.manual,
+      templateInstanceId: existing?.templateInstanceId,
+      templateParams:     existing?.templateParams ?? const {},
       anchorId:       _isWifiCriteria ? null : _anchorId,
       wifiSSID:       _isWifiCriteria ? _wifiSsidCtrl.text.trim() : null,
       beepAnchors:    _beepAnchors,
       anchorProfile:  _beepAnchors.isEmpty ? null : _anchorProfile,
       color:          _color,
     );
-    Navigator.of(context).pop(a);
+    Navigator.of(context).pop(AutomationModalResult.save(a));
   }
 
   // ── Build ─────────────────────────────────────────────────────────────────
@@ -135,6 +157,8 @@ class _AddAutomationModalState extends State<AddAutomationModal> {
                     _buildTarget(),
                     const SizedBox(height: 20),
                     _buildProfile(),
+                    const SizedBox(height: 20),
+                    _buildDonningGrace(),
                     const SizedBox(height: 20),
                     _buildBeepAnchors(),
                     const SizedBox(height: 20),
@@ -338,12 +362,21 @@ class _AddAutomationModalState extends State<AddAutomationModal> {
       );
     }
 
-    // Anchor picker
+    // Anchor picker (for phoneAway this is the docking anchor, §8.6)
+    final isPhoneAway = _criteria == Criteria.phoneAway;
     final anchors = BluetoothService().anchors;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _title('Target Anchor'),
+        _title(isPhoneAway ? 'Docking Anchor' : 'Target Anchor'),
+        if (isPhoneAway) ...[
+          const SizedBox(height: 4),
+          const Text(
+            'Your phone docks at this anchor for the block. The phone must sit '
+            'on the dock with the app open and low-power mode off.',
+            style: TextStyle(color: AppTheme.textGrey, fontSize: 12),
+          ),
+        ],
         const SizedBox(height: 12),
         if (anchors.isEmpty)
           const Text(
@@ -362,12 +395,45 @@ class _AddAutomationModalState extends State<AddAutomationModal> {
     );
   }
 
-  // ── Enforcement profile ───────────────────────────────────────────────────
+  // ── Donning grace (§5.4.4) ────────────────────────────────────────────────
+
+  Widget _buildDonningGrace() => Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _title('Grace after putting the watch on'),
+          const SizedBox(height: 4),
+          const Text(
+            'Seconds of quiet after you don the watch before this commitment '
+            'starts checking (0–1800). 0 = none.',
+            style: TextStyle(color: AppTheme.textGrey, fontSize: 12),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _graceCtrl,
+            keyboardType: TextInputType.number,
+            style: const TextStyle(color: AppTheme.textWhite),
+            decoration: InputDecoration(
+              suffixText: 'seconds',
+              suffixStyle: const TextStyle(color: AppTheme.textGrey),
+              filled: true,
+              fillColor: AppTheme.backgroundGrey,
+              border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(8),
+                  borderSide: const BorderSide(color: AppTheme.cardGrey)),
+              enabledBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(8),
+                  borderSide: const BorderSide(color: AppTheme.cardGrey)),
+            ),
+          ),
+        ],
+      );
+
+  // ── Firmness profile ──────────────────────────────────────────────────────
 
   Widget _buildProfile() => Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          _title('Enforcement Profile'),
+          _title('Firmness'),
           const SizedBox(height: 12),
           _dropdown<EnforcementProfile>(
             value: _profile,
@@ -505,6 +571,17 @@ class _AddAutomationModalState extends State<AddAutomationModal> {
         child: Row(
           mainAxisAlignment: MainAxisAlignment.end,
           children: [
+            if (widget.existingAutomation != null) ...[
+              TextButton.icon(
+                onPressed: () => Navigator.of(context)
+                    .pop(const AutomationModalResult.delete()),
+                icon: const Icon(Icons.delete_outline,
+                    color: Colors.redAccent, size: 18),
+                label: const Text('Remove',
+                    style: TextStyle(color: Colors.redAccent)),
+              ),
+              const Spacer(),
+            ],
             TextButton(
               onPressed: () => Navigator.of(context).pop(),
               child: const Text('Cancel',

@@ -2,11 +2,13 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart' as fbp;
+import 'package:provider/provider.dart';
 
 import '../models/bluetooth_device_model.dart';
 import '../services/bluetooth_service.dart';
 import '../services/watch_service.dart';
 import '../services/automation_service.dart';
+import '../state/app_state.dart';
 import '../theme/app_theme.dart';
 import '../widgets/device_settings_modal.dart';
 
@@ -111,6 +113,7 @@ class _DevicesScreenState extends State<DevicesScreen> {
 
       await _watchService.connect(fbpDevice);
       await _btService.updateDeviceStatus(model.id, true, model.rssi);
+      if (mounted) context.read<AppState>().connectionChanged();
 
       setState(() { _statusMsg = 'Connected to ${model.name}'; });
     } catch (e) {
@@ -120,6 +123,7 @@ class _DevicesScreenState extends State<DevicesScreen> {
 
   Future<void> _disconnectWatch() async {
     await _watchService.disconnect();
+    if (mounted) context.read<AppState>().connectionChanged();
     setState(() { _statusMsg = 'Disconnected'; _watchStatus = null; });
   }
 

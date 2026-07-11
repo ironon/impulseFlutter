@@ -225,6 +225,38 @@ class CommitmentPolicyService {
     return _passAllowance;
   }
 
+  /// Apply a promoted setting-type pending entry (the promotion path calls
+  /// this once the delay elapses — not a user-facing setter).
+  Future<void> applyPromotedSetting(Map<String, dynamic> proposed) async {
+    final now = _now();
+    if (proposed.containsKey('pass_allowance')) {
+      _passAllowance = proposed['pass_allowance'] as int;
+      await integrity.audit(
+        category: 'pass_allowance_changed',
+        detail: 'Allowance raise to $_passAllowance took effect',
+        now: now,
+      );
+    }
+    if (proposed.containsKey('settle_window_min')) {
+      _config = _config.withSettleMinutes(proposed['settle_window_min'] as int);
+      await integrity.audit(
+        category: 'settle_window_changed',
+        detail:
+            'Free-edit window change to ${_config.settleWindow.inMinutes} min took effect',
+        now: now,
+      );
+    }
+  }
+
+  /// Restore persisted values on startup (not gated — they already passed the
+  /// gate when first changed).
+  void restore({int? passAllowance, int? settleWindowMin}) {
+    if (passAllowance != null) _passAllowance = passAllowance;
+    if (settleWindowMin != null) {
+      _config = _config.withSettleMinutes(settleWindowMin);
+    }
+  }
+
   /// Change the settle window. Shrinking is immediate; growing is a loosening
   /// gated 24h (§8.9 item 4). Value clamped to [30, 240].
   Future<SelfBindingConfig> changeSettleWindow(int minutes) async {

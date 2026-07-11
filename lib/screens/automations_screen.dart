@@ -1,10 +1,20 @@
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
+
 import '../models/automation_model.dart';
 import '../services/automation_service.dart';
+import '../services/self_binding_policy.dart';
+import '../services/watch_service.dart';
+import '../state/app_state.dart';
 import '../theme/app_theme.dart';
 import '../widgets/add_automation_modal.dart';
 import '../widgets/automation_block.dart';
+import '../widgets/policy_verdict.dart';
+import 'pending_changes_screen.dart';
 
+/// The raw-block day calendar. In Advanced mode this is the truthful view of
+/// exactly what the watch enforces (§2A); every edit routes through the
+/// self-binding gate (§8.9) via AppState.
 class AutomationsScreen extends StatefulWidget {
   const AutomationsScreen({super.key});
 
@@ -20,28 +30,41 @@ class _AutomationsScreenState extends State<AutomationsScreen> {
   void initState() {
     super.initState();
     _selectedDate = DateTime.now();
-    _initializeService();
-  }
-
-  Future<void> _initializeService() async {
-    await _automationService.initialize();
-    setState(() {});
   }
 
   @override
   Widget build(BuildContext context) {
-    final automationsForDate = _automationService.getAutomationsForDate(_selectedDate);
-    final layouts = _automationService.calculateAutomationLayouts(automationsForDate);
+    final app = context.watch<AppState>();
+    final automationsForDate =
+        _automationService.getAutomationsForDate(_selectedDate);
+    final layouts =
+        _automationService.calculateAutomationLayouts(automationsForDate);
+    final pendingIds = app.pendingEventIds;
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Automations'),
+        title: const Text('Blocks'),
+        actions: [
+          IconButton(
+            tooltip: 'Pending changes',
+            icon: Badge(
+              isLabelVisible: pendingIds.isNotEmpty,
+              backgroundColor: Colors.amber,
+              label: Text('${pendingIds.length}',
+                  style: const TextStyle(
+                      color: AppTheme.darkGrey, fontSize: 10)),
+              child: const Icon(Icons.hourglass_top),
+            ),
+            onPressed: () => Navigator.of(context).push(MaterialPageRoute(
+                builder: (_) => const PendingChangesScreen())),
+          ),
+        ],
       ),
       body: Column(
         children: [
           _buildDateNavigator(),
           Expanded(
-            child: _buildCalendarView(automationsForDate, layouts),
+            child: _buildCalendarView(automationsForDate, layouts, pendingIds),
           ),
         ],
       ),
@@ -99,6 +122,7 @@ class _AutomationsScreenState extends State<AutomationsScreen> {
   Widget _buildCalendarView(
     List<Automation> automations,
     Map<String, AutomationLayout> layouts,
+    Set<String> pendingIds,
   ) {
     return Row(
       children: [
@@ -148,6 +172,8 @@ class _AutomationsScreenState extends State<AutomationsScreen> {
                 return AutomationBlock(
                   automation: automation,
                   layout: layout,
+                  hasPendingChange: pendingIds.contains(automation.id),
+                  showOrigin: true,
                   onTap: () => _editAutomation(automation),
                 );
               }),
@@ -180,71 +206,92 @@ class _AutomationsScreenState extends State<AutomationsScreen> {
     return '$weekday, $month ${date.day}';
   }
 
-  String _getWeekdayName(int weekday) {
-    switch (weekday) {
-      case 1:
-        return 'Mon';
-      case 2:
-        return 'Tue';
-      case 3:
-        return 'Wed';
-      case 4:
-        return 'Thu';
-      case 5:
-        return 'Fri';
-      case 6:
-        return 'Sat';
-      case 7:
-        return 'Sun';
-      default:
-        return '';
-    }
-  }
+  String _getWeekdayName(int weekday) => const [
+        '', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'
+      ][weekday];
 
   String _getMonthName(int month) {
     const months = [
-      'Jan',
-      'Feb',
-      'Mar',
-      'Apr',
-      'May',
-      'Jun',
-      'Jul',
-      'Aug',
-      'Sep',
-      'Oct',
-      'Nov',
-      'Dec',
+      'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
     ];
     return months[month - 1];
   }
 
+  void _showPushResult(ScheduleEndResult? push) {
+    if (!mounted || push == null || push == ScheduleEndResult.accepted) return;
+    // Surface 0x03/0x04 (and failures) honestly — never as a full apply.
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(push.userMessage)));
+  }
+
   Future<void> _addAutomation() async {
-    final result = await showDialog<Automation>(
+    final app = context.read<AppState>();
+    final result = await showDialog<AutomationModalResult>(
       context: context,
       builder: (context) => AddAutomationModal(
         initialDate: _selectedDate,
       ),
     );
 
-    if (result != null) {
-      await _automationService.addAutomation(result);
+    if (result?.saved case final a?) {
+      final saved = await app.saveCommitment(updated: a);
+      _showPushResult(saved.pushResult);
       setState(() {});
     }
   }
 
   Future<void> _editAutomation(Automation automation) async {
-    final result = await showDialog<Automation?>(
+    final app = context.read<AppState>();
+    final result = await showDialog<AutomationModalResult>(
       context: context,
       builder: (context) => AddAutomationModal(
         initialDate: _selectedDate,
         existingAutomation: automation,
       ),
     );
+    if (result == null || !mounted) return;
 
-    if (result != null) {
-      await _automationService.updateAutomation(result);
+    // ── Delete path ──
+    if (result.deleteRequested) {
+      final preview = app.policy.previewDelete(automation);
+      final ok = await confirmWithVerdict(context,
+          outcome: preview, title: 'Remove this commitment?');
+      if (!ok) return;
+      final res = await app.deleteCommitment(automation);
+      _showPushResult(res.pushResult);
       setState(() {});
+      return;
     }
+
+    var updated = result.saved!;
+
+    // ── Detach-to-manual (§2A.3): hand-editing a template block ──
+    final changed =
+        app.policy.previewEdit(automation, updated).classification !=
+            ChangeClassification.noChange;
+    final detached =
+        automation.origin != TemplateOrigin.manual && changed;
+    if (detached) {
+      updated = updated.detachToManual();
+    }
+
+    // ── Preview verdict BEFORE committing ──
+    if (changed) {
+      final preview = app.policy.previewEdit(automation, updated);
+      final ok = await confirmWithVerdict(context, outcome: preview);
+      if (!ok) return;
+    }
+
+    final saved =
+        await app.saveCommitment(previous: automation, updated: updated);
+    _showPushResult(saved.pushResult);
+    if (detached && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text(
+            'This block is now custom — its template card no longer manages it.'),
+      ));
+    }
+    setState(() {});
   }
 }
