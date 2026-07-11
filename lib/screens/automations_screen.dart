@@ -60,18 +60,16 @@ class _AutomationsScreenState extends State<AutomationsScreen> {
           ),
         ],
       ),
-      body: Column(
+      body: SingleChildScrollView(
+        child:Column(
         children: [
           _buildDateNavigator(),
           Expanded(
     
-            child: SingleChildScrollView(
-              scrollDirection: Axis.vertical,
-              child: _buildCalendarView(automationsForDate, layouts, pendingIds),
-            ),
+            child:_buildCalendarView(automationsForDate, layouts, pendingIds),
           ),
         ],
-      ),
+      )),
       floatingActionButton: FloatingActionButton(
         onPressed: _addAutomation,
         backgroundColor: AppTheme.lightOrange,
