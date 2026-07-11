@@ -145,6 +145,39 @@ class WatchStatus {
   }
 }
 
+/// Watch verdict on a schedule END (firmware §6.2/§9.3, spec §7.1).
+/// `partialQuarantine`/`rejected` must never be shown as a full apply.
+enum ScheduleEndResult { accepted, partialQuarantine, rejected, failed }
+
+extension ScheduleEndResultX on ScheduleEndResult {
+  bool get fullyApplied => this == ScheduleEndResult.accepted;
+  String get userMessage {
+    switch (this) {
+      case ScheduleEndResult.accepted:
+        return 'Schedule saved to your watch';
+      case ScheduleEndResult.partialQuarantine:
+        return 'Saved — but the easing you made will take effect later';
+      case ScheduleEndResult.rejected:
+        return 'That change can\'t ease a commitment that\'s running right now';
+      case ScheduleEndResult.failed:
+        return 'Couldn\'t reach the watch — try again';
+    }
+  }
+}
+
+/// One entry from the watch's authoritative Pending Changes queue (`…001A`,
+/// firmware §9.5). `secondsUntilApply` is the watch's own countdown.
+class PendingChangeEntry {
+  final String eventUuid;
+  final int changeType;
+  final int secondsUntilApply;
+  const PendingChangeEntry({
+    required this.eventUuid,
+    required this.changeType,
+    required this.secondsUntilApply,
+  });
+}
+
 // ── SeenAnchorInfo ───────────────────────────────────────────────────────────
 
 class SeenAnchorInfo {
@@ -178,6 +211,9 @@ class WatchService {
   fbp.BluetoothCharacteristic? _seenAnchorsChar;
   fbp.BluetoothCharacteristic? _statusChar;
   fbp.BluetoothCharacteristic? _anchorIpChar;
+  fbp.BluetoothCharacteristic? _timeChar;
+  fbp.BluetoothCharacteristic? _pendingChar;
+  fbp.BluetoothCharacteristic? _emergencyPassChar;
 
   StreamSubscription<List<int>>? _statusSub;
   StreamSubscription<List<int>>? _seenAnchorsSub;
@@ -225,6 +261,100 @@ class WatchService {
     _seenAnchorsChar = null;
     _statusChar      = null;
     _anchorIpChar    = null;
+    _timeChar        = null;
+    _pendingChar     = null;
+    _emergencyPassChar = null;
+  }
+
+  // ── Runtime capability probes (§8.11, §9.5/§9.6) ──────────────────────────
+  // Firmware-dependent characteristics may be absent on a given build; degrade
+  // gracefully rather than assume they exist.
+
+  bool get hasTimeCharacteristic          => _timeChar != null;
+  bool get hasPendingChangesCharacteristic => _pendingChar != null;
+  bool get hasEmergencyPassCharacteristic  => _emergencyPassChar != null;
+
+  /// Set the watch clock over BLE (§8.11): `[utc_epoch int64][tz_offset int16]`.
+  /// Returns the response byte (0x01 ok; 0x02 rejected — would end the active
+  /// window, §9.7). Returns null if the characteristic is absent.
+  Future<int?> pushTime(DateTime utc, int tzOffsetMinutes) async {
+    if (_timeChar == null) return null;
+    final data = ByteData(10);
+    data.setInt64(0, utc.toUtc().millisecondsSinceEpoch ~/ 1000, Endian.little);
+    data.setInt16(8, tzOffsetMinutes, Endian.little);
+
+    final completer = Completer<int?>();
+    late StreamSubscription sub;
+    sub = _timeChar!.onValueReceived.listen((val) {
+      if (!completer.isCompleted) {
+        completer.complete(val.isNotEmpty ? val[0] : null);
+        sub.cancel();
+      }
+    });
+    await _timeChar!.setNotifyValue(true);
+    await _timeChar!.write(data.buffer.asUint8List(), withoutResponse: false);
+    return completer.future.timeout(const Duration(seconds: 5),
+        onTimeout: () { sub.cancel(); return null; });
+  }
+
+  /// Read the watch's authoritative pending-loosening queue (`…001A`, §9.5).
+  /// Returns null if the characteristic is absent (probe before use).
+  Future<List<PendingChangeEntry>?> readPendingChanges() async {
+    if (_pendingChar == null) return null;
+    final val = await _pendingChar!.read();
+    return _parsePendingChanges(val);
+  }
+
+  List<PendingChangeEntry> _parsePendingChanges(List<int> bytes) {
+    if (bytes.isEmpty) return [];
+    final count = bytes[0];
+    final out = <PendingChangeEntry>[];
+    int pos = 1;
+    for (int i = 0; i < count; i++) {
+      if (pos + 21 > bytes.length) break;
+      final uuid = _bytesToUuidStr(bytes.sublist(pos, pos + 16));
+      pos += 16;
+      final changeType = bytes[pos];
+      pos += 1;
+      final secs = ByteData.sublistView(
+              Uint8List.fromList(bytes.sublist(pos, pos + 4)))
+          .getUint32(0, Endian.little);
+      pos += 4;
+      out.add(PendingChangeEntry(
+        eventUuid: uuid,
+        changeType: changeType,
+        secondsUntilApply: secs,
+      ));
+    }
+    return out;
+  }
+
+  /// Spend an emergency pass on the watch ledger (`…001B`, §9.6):
+  /// `[0x01][event uuid 16][date u32 YYYYMMDD]`. Returns (respByte, remaining).
+  /// Returns null if the characteristic is absent (use the interim app ledger).
+  Future<({int resp, int? remaining})?> spendEmergencyPass(
+      String eventUuid, int dateYyyymmdd) async {
+    if (_emergencyPassChar == null) return null;
+    final buf = BytesBuilder(copy: false);
+    buf.addByte(0x01);
+    buf.add(ScheduleEncoder.uuidToBytes(eventUuid));
+    final bd = ByteData(4)..setUint32(0, dateYyyymmdd, Endian.little);
+    buf.add(bd.buffer.asUint8List());
+
+    final completer = Completer<({int resp, int? remaining})?>();
+    late StreamSubscription sub;
+    sub = _emergencyPassChar!.onValueReceived.listen((val) {
+      if (!completer.isCompleted) {
+        completer.complete(val.isEmpty
+            ? null
+            : (resp: val[0], remaining: val.length > 1 ? val[1] : null));
+        sub.cancel();
+      }
+    });
+    await _emergencyPassChar!.setNotifyValue(true);
+    await _emergencyPassChar!.write(buf.toBytes(), withoutResponse: false);
+    return completer.future.timeout(const Duration(seconds: 5),
+        onTimeout: () { sub.cancel(); return null; });
   }
 
   void _bindCharacteristics(List<fbp.BluetoothService> services) {
@@ -241,6 +371,9 @@ class WatchService {
           if (uuid == BleConstants.watchSeenAnchorsCharUuid) _seenAnchorsChar = c;
           if (uuid == BleConstants.watchStatusCharUuid)      _statusChar      = c;
           if (uuid == BleConstants.watchAnchorIpCharUuid)    _anchorIpChar    = c;
+          if (uuid == BleConstants.watchTimeCharUuid)        _timeChar        = c;
+          if (uuid == BleConstants.watchPendingCharUuid)     _pendingChar     = c;
+          if (uuid == BleConstants.watchEmergencyPassCharUuid) _emergencyPassChar = c;
         }
         break;
       }
@@ -352,17 +485,22 @@ class WatchService {
   // ── Settings ─────────────────────────────────────────────────────────────
 
   /// Returns true on success (watch responded 0x01).
+  /// Settings payload (v2, 6 bytes — firmware v0.5, lockstep):
+  /// `[disconnected_is_dormant u8][away_is_dormant u8][tz_offset int16]
+  ///  [settle_window_min u16 (clamped 30–240)]`.
   Future<bool> pushSettings({
     required bool disconnectedIsDormant,
     required bool awayIsDormant,
     required int tzOffsetMinutes,
+    int settleWindowMin = 120,
   }) async {
     if (_settingsChar == null) throw StateError('Not connected to watch');
 
-    final data = ByteData(4);
+    final data = ByteData(6);
     data.setUint8(0, disconnectedIsDormant ? 1 : 0);
     data.setUint8(1, awayIsDormant         ? 1 : 0);
     data.setInt16(2, tzOffsetMinutes, Endian.little);
+    data.setUint16(4, settleWindowMin.clamp(30, 240), Endian.little);
 
     final completer = Completer<bool>();
     late StreamSubscription sub;
@@ -388,8 +526,9 @@ class WatchService {
   // ── Schedule transfer ─────────────────────────────────────────────────────
 
   /// Encodes and sends the full schedule to the watch via the 3-phase BLE
-  /// transfer protocol.  Returns true if the watch acknowledged successfully.
-  Future<bool> pushSchedule(List<Automation> automations) async {
+  /// transfer protocol. Returns the watch's END verdict (§7.1) — the app must
+  /// never render `0x03`/`0x04` as if the edit fully applied.
+  Future<ScheduleEndResult> pushSchedule(List<Automation> automations) async {
     if (_schedCtrlChar == null || _schedDataChar == null) {
       throw StateError('Not connected to watch');
     }
@@ -405,8 +544,8 @@ class WatchService {
     beginPkt.setUint8(0, 0x01);
     beginPkt.setUint32(1, blob.length, Endian.little);
 
-    var respOk = await _writeCtrlAwaitNotify(beginPkt.buffer.asUint8List());
-    if (!respOk) return false;
+    final beginByte = await _writeCtrlAwaitByte(beginPkt.buffer.asUint8List());
+    if (beginByte != 0x01) return ScheduleEndResult.failed;
 
     // ── Phase 2: DATA (chunks ≤ 20 bytes) ──────────────────────────────
     const chunkSize = 20;
@@ -425,25 +564,34 @@ class WatchService {
     endPkt.setUint8(0, 0x02);
     endPkt.setUint32(1, crc, Endian.little);
 
-    respOk = await _writeCtrlAwaitNotify(endPkt.buffer.asUint8List());
-    return respOk;
+    final endByte = await _writeCtrlAwaitByte(endPkt.buffer.asUint8List());
+    switch (endByte) {
+      case 0x01:
+        return ScheduleEndResult.accepted;
+      case 0x03:
+        return ScheduleEndResult.partialQuarantine;
+      case 0x04:
+        return ScheduleEndResult.rejected;
+      default:
+        return ScheduleEndResult.failed;
+    }
   }
 
-  /// Writes to the schedule ctrl characteristic and waits for a notify
-  /// response from the firmware.  Returns true if firmware replied 0x01.
-  Future<bool> _writeCtrlAwaitNotify(List<int> data) async {
-    final completer = Completer<bool>();
+  /// Writes to the schedule ctrl characteristic and returns the firmware's
+  /// first response byte (or null on timeout).
+  Future<int?> _writeCtrlAwaitByte(List<int> data) async {
+    final completer = Completer<int?>();
     late StreamSubscription sub;
     sub = _schedCtrlChar!.onValueReceived.listen((val) {
       if (!completer.isCompleted) {
-        completer.complete(val.isNotEmpty && val[0] == 0x01);
+        completer.complete(val.isNotEmpty ? val[0] : null);
         sub.cancel();
       }
     });
     await _schedCtrlChar!.write(data, withoutResponse: false);
     return completer.future.timeout(
       const Duration(seconds: 10),
-      onTimeout: () { sub.cancel(); return false; },
+      onTimeout: () { sub.cancel(); return null; },
     );
   }
 

@@ -132,10 +132,10 @@ class _DevicesScreenState extends State<DevicesScreen> {
     }
     setState(() { _isPushing = true; _statusMsg = 'Pushing schedule…'; });
     try {
-      final ok = await _watchService.pushSchedule(_autoService.automations);
+      final result = await _watchService.pushSchedule(_autoService.automations);
       setState(() {
         _isPushing = false;
-        _statusMsg = ok ? 'Schedule pushed ✓' : 'Schedule push failed';
+        _statusMsg = result.userMessage;
       });
     } catch (e) {
       setState(() { _isPushing = false; _statusMsg = 'Error: $e'; });
