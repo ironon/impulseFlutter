@@ -12,6 +12,11 @@ import '../models/automation_model.dart';
 ///   - The DATA phase of the BLE schedule transfer (pass [blobOnly] = true to
 ///     omit the CRC; pass the CRC separately in the END packet).
 class ScheduleEncoder {
+  /// Leading format-version byte of the v2 schedule blob (firmware §6.2,
+  /// `SCHEDULE_FORMAT_VERSION`). A v1 parser misreads this as event-count
+  /// bits, so emitting it is a lockstep change with watch + anchor firmware.
+  static const int scheduleFormatVersion = 0x02;
+
   // ── CRC-32 (ISO 3309 / zlib polynomial 0xEDB88320) ─────────────────────
 
   static int crc32(Uint8List data) {
@@ -59,6 +64,9 @@ class ScheduleEncoder {
   static Uint8List encodeBlob(List<Automation> events) {
     final buf = BytesBuilder(copy: false);
 
+    // Format version byte (v2 blob, §7.2 — lockstep with firmware).
+    buf.addByte(scheduleFormatVersion);
+
     // Event count (uint16 LE)
     _writeUint16(buf, events.length);
 
@@ -88,6 +96,9 @@ class ScheduleEncoder {
 
       // negate (1 byte)
       buf.addByte(e.negate ? 1 : 0);
+
+      // donning_grace_s (uint16 LE, 0 = none; firmware §5.4.4). Clamp defensively.
+      _writeUint16(buf, e.donningGraceS.clamp(0, 1800));
 
       // anchorId presence flag + 16 bytes
       final hasAnchor = e.anchorId != null ? 1 : 0;

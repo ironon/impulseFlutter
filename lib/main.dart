@@ -1,29 +1,38 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 import 'theme/app_theme.dart';
 import 'models/bluetooth_device_model.dart';
 import 'services/bluetooth_service.dart';
 import 'services/watch_service.dart';
+import 'state/app_state.dart';
 import 'screens/devices_screen.dart';
 import 'screens/automations_screen.dart';
 import 'screens/settings_screen.dart';
 import 'screens/debug_screen.dart';
 
-void main() {
-  runApp(const ImpulseApp());
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  final appState = await bootstrapAppState();
+  runApp(ImpulseApp(appState: appState));
 }
 
 class ImpulseApp extends StatelessWidget {
-  const ImpulseApp({super.key});
+  const ImpulseApp({super.key, required this.appState});
+
+  final AppState appState;
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'Impulse',
-      debugShowCheckedModeBanner: false,
-      theme: AppTheme.darkTheme,
-      home: const MainScreen(),
+    return ChangeNotifierProvider<AppState>.value(
+      value: appState,
+      child: MaterialApp(
+        title: 'Impulse',
+        debugShowCheckedModeBanner: false,
+        theme: AppTheme.darkTheme,
+        home: const MainScreen(),
+      ),
     );
   }
 }

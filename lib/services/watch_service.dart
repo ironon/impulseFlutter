@@ -12,6 +12,19 @@ import 'debug_log_service.dart';
 
 // ── WatchStatus model ────────────────────────────────────────────────────────
 
+/// A queued "couldn't reach this beep-anchor" notification (§8.7).
+class UnreachableAnchor {
+  final String uuid;
+  final String name;
+  final DateTime timestamp;
+  const UnreachableAnchor({
+    required this.uuid,
+    required this.name,
+    required this.timestamp,
+  });
+}
+
+/// Decoded Watch Status characteristic (`…0016`, firmware §5.6 / spec §6.1).
 class WatchStatus {
   /// 0 = dormant, 1 = enforcement, 2 = dormant_sleep
   final int activityState;
@@ -23,6 +36,14 @@ class WatchStatus {
   /// UUID string of the currently active event, or null.
   final String? activeEventId;
 
+  /// `condition_met` byte (firmware v0.6, lockstep): false ⇒ the watch is
+  /// actively alarming; true ⇒ in-window and compliant (or no active window).
+  /// Null when the firmware predates the byte (short payload).
+  final bool? conditionMet;
+
+  /// Queued unreachable beep-anchor notifications (§8.7).
+  final List<UnreachableAnchor> unreachableAnchors;
+
   const WatchStatus({
     required this.activityState,
     required this.btConnected,
@@ -30,6 +51,8 @@ class WatchStatus {
     required this.worn,
     required this.batteryPct,
     this.activeEventId,
+    this.conditionMet,
+    this.unreachableAnchors = const [],
   });
 
   String get activityLabel {
@@ -41,8 +64,13 @@ class WatchStatus {
     }
   }
 
+  /// True when there is an active event and the watch is actively alarming.
+  bool get isAlarming => activeEventId != null && conditionMet == false;
+
   static WatchStatus fromBytes(List<int> bytes) {
-    if (bytes.length < 22) {
+    // Layout: activity u8, bt u8, wifi u8, worn u8, battery u8,
+    //         active_event_id 16, [condition_met u8], [unreachable_count u8, ...]
+    if (bytes.length < 21) {
       return const WatchStatus(
         activityState: 0,
         btConnected: false,
@@ -51,19 +79,49 @@ class WatchStatus {
         batteryPct: 0xFF,
       );
     }
-    final actState    = bytes[0];
-    final btConn      = bytes[1] != 0;
-    final wifiConn    = bytes[2] != 0;
-    final worn        = bytes[3] != 0;
-    // Battery is now uint16 little-endian at bytes[4..5]
-    final batt        = bytes[4] | (bytes[5] << 8);
+    final actState = bytes[0];
+    final btConn   = bytes[1] != 0;
+    final wifiConn = bytes[2] != 0;
+    final worn     = bytes[3] != 0;
+    final batt     = bytes[4];
 
-    // Active event UUID (16 bytes at offset 6)
-    final eventBytes  = bytes.sublist(6, 22);
-    final allZero     = eventBytes.every((b) => b == 0);
-    String? eventId;
-    if (!allZero) {
-      eventId = _bytesToUuidStr(eventBytes);
+    final eventBytes = bytes.sublist(5, 21);
+    final allZero    = eventBytes.every((b) => b == 0);
+    final eventId    = allZero ? null : _bytesToUuidStr(eventBytes);
+
+    int pos = 21;
+    bool? conditionMet;
+    if (pos < bytes.length) {
+      conditionMet = bytes[pos] != 0;
+      pos += 1;
+    }
+
+    final unreachable = <UnreachableAnchor>[];
+    if (pos < bytes.length) {
+      final count = bytes[pos];
+      pos += 1;
+      for (int i = 0; i < count; i++) {
+        if (pos + 16 > bytes.length) break;
+        final uuid = _bytesToUuidStr(bytes.sublist(pos, pos + 16));
+        pos += 16;
+        if (pos >= bytes.length) break;
+        final nameLen = bytes[pos];
+        pos += 1;
+        if (pos + nameLen > bytes.length) break;
+        final name = utf8.decode(bytes.sublist(pos, pos + nameLen),
+            allowMalformed: true);
+        pos += nameLen;
+        if (pos + 4 > bytes.length) break;
+        final ts = ByteData.sublistView(
+                Uint8List.fromList(bytes.sublist(pos, pos + 4)))
+            .getUint32(0, Endian.little);
+        pos += 4;
+        unreachable.add(UnreachableAnchor(
+          uuid: uuid,
+          name: name,
+          timestamp: DateTime.fromMillisecondsSinceEpoch(ts * 1000),
+        ));
+      }
     }
 
     return WatchStatus(
@@ -73,6 +131,8 @@ class WatchStatus {
       worn: worn,
       batteryPct: batt,
       activeEventId: eventId,
+      conditionMet: conditionMet,
+      unreachableAnchors: unreachable,
     );
   }
 
