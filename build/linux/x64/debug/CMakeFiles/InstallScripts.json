@@ -1,0 +1,9 @@
+{
+	"InstallScripts" : 
+	[
+		"/home/ironon/Impulse/FlutterApp/impulse_app/build/linux/x64/debug/cmake_install.cmake",
+		"/home/ironon/Impulse/FlutterApp/impulse_app/build/linux/x64/debug/flutter/cmake_install.cmake",
+		"/home/ironon/Impulse/FlutterApp/impulse_app/build/linux/x64/debug/runner/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

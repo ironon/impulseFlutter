@@ -1,0 +1,14 @@
+/home/ironon/Impulse/FlutterApp/impulse_app/build/linux/x64/debug/bundle/impulse_app
+/home/ironon/Impulse/FlutterApp/impulse_app/build/linux/x64/debug/bundle/data/icudtl.dat
+/home/ironon/Impulse/FlutterApp/impulse_app/build/linux/x64/debug/bundle/lib/libflutter_linux_gtk.so
+/home/ironon/Impulse/FlutterApp/impulse_app/build/linux/x64/debug/bundle/lib/native_assets.json
+/home/ironon/Impulse/FlutterApp/impulse_app/build/linux/x64/debug/bundle/data/flutter_assets/FontManifest.json
+/home/ironon/Impulse/FlutterApp/impulse_app/build/linux/x64/debug/bundle/data/flutter_assets/fonts/MaterialIcons-Regular.otf
+/home/ironon/Impulse/FlutterApp/impulse_app/build/linux/x64/debug/bundle/data/flutter_assets/kernel_blob.bin
+/home/ironon/Impulse/FlutterApp/impulse_app/build/linux/x64/debug/bundle/data/flutter_assets/NativeAssetsManifest.json
+/home/ironon/Impulse/FlutterApp/impulse_app/build/linux/x64/debug/bundle/data/flutter_assets/version.json
+/home/ironon/Impulse/FlutterApp/impulse_app/build/linux/x64/debug/bundle/data/flutter_assets/AssetManifest.bin
+/home/ironon/Impulse/FlutterApp/impulse_app/build/linux/x64/debug/bundle/data/flutter_assets/packages/cupertino_icons/assets/CupertinoIcons.ttf
+/home/ironon/Impulse/FlutterApp/impulse_app/build/linux/x64/debug/bundle/data/flutter_assets/NOTICES.Z
+/home/ironon/Impulse/FlutterApp/impulse_app/build/linux/x64/debug/bundle/data/flutter_assets/shaders/stretch_effect.frag
+/home/ironon/Impulse/FlutterApp/impulse_app/build/linux/x64/debug/bundle/data/flutter_assets/shaders/ink_sparkle.frag
