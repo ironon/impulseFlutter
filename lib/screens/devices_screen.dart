@@ -112,7 +112,13 @@ class _DevicesScreenState extends State<DevicesScreen> {
       fbpDevice ??= fbp.BluetoothDevice.fromId(model.id);
 
       await _watchService.connect(fbpDevice);
+      // get time and offset from phone and push to watch
+      final time = DateTime.now();
+      final offset = DateTime.now().timeZoneOffset.inMinutes;
+
+      await _watchService.pushTime(time, offset);
       await _btService.updateDeviceStatus(model.id, true, model.rssi);
+     
       if (mounted) context.read<AppState>().connectionChanged();
 
       setState(() { _statusMsg = 'Connected to ${model.name}'; });

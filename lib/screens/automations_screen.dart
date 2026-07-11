@@ -131,6 +131,7 @@ class _AutomationsScreenState extends State<AutomationsScreen> {
           width: 60,
           child: ListView.builder(
             itemCount: 24,
+            physics: const NeverScrollableScrollPhysics(),
             itemBuilder: (context, index) {
               return SizedBox(
                 height: 60,
@@ -154,6 +155,7 @@ class _AutomationsScreenState extends State<AutomationsScreen> {
               // Hour dividers
               ListView.builder(
                 itemCount: 24,
+                physics: const NeverScrollableScrollPhysics(),
                 itemBuilder: (context, index) {
                   return Container(
                     height: 60,

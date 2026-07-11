@@ -17,6 +17,10 @@ class BluetoothDeviceModel {
   /// only via the watch's SeenAnchors characteristic.
   final String? bleRemoteId;
 
+  /// User-assigned role tag for anchors (§4.4): e.g. "bedroom", "nightstand",
+  /// "desk", "phone dock". Null when unassigned.
+  final String? role;
+
   const BluetoothDeviceModel({
     required this.id,
     required this.name,
@@ -27,6 +31,7 @@ class BluetoothDeviceModel {
     this.ipAddress,
     this.ipLastUpdated,
     this.bleRemoteId,
+    this.role,
   });
 
   Map<String, dynamic> toJson() => {
@@ -39,6 +44,7 @@ class BluetoothDeviceModel {
         'ipAddress': ipAddress,
         'ipLastUpdated': ipLastUpdated?.toIso8601String(),
         'bleRemoteId': bleRemoteId,
+        'role': role,
       };
 
   factory BluetoothDeviceModel.fromJson(Map<String, dynamic> json) {
@@ -57,6 +63,7 @@ class BluetoothDeviceModel {
           ? null
           : DateTime.parse(json['ipLastUpdated'] as String),
       bleRemoteId: json['bleRemoteId'] as String?,
+      role: json['role'] as String?,
     );
   }
 
@@ -70,6 +77,7 @@ class BluetoothDeviceModel {
     String? ipAddress,
     DateTime? ipLastUpdated,
     String? bleRemoteId,
+    String? role,
   }) {
     return BluetoothDeviceModel(
       id: id ?? this.id,
@@ -81,6 +89,7 @@ class BluetoothDeviceModel {
       ipAddress: ipAddress ?? this.ipAddress,
       ipLastUpdated: ipLastUpdated ?? this.ipLastUpdated,
       bleRemoteId: bleRemoteId ?? this.bleRemoteId,
+      role: role ?? this.role,
     );
   }
 }
