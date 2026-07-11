@@ -299,6 +299,7 @@ class _AddAutomationModalState extends State<AddAutomationModal> {
               DropdownMenuItem(value: Criteria.getAway,    child: Text('Get Away from anchor')),
               DropdownMenuItem(value: Criteria.getOnWifi,  child: Text('Get On WiFi network')),
               DropdownMenuItem(value: Criteria.getOffWifi, child: Text('Get Off WiFi network')),
+              DropdownMenuItem(value: Criteria.phoneAway,  child: Text('Phone away (dock the phone)')),
             ],
             onChanged: (v) {
               if (v != null) setState(() => _criteria = v);

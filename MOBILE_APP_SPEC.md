@@ -15,21 +15,22 @@ This spec changes rapidly. Rules for maintaining this section:
 
 ### 0.1 Spec ↔ app parity
 
-Code home: `impulse_app/lib`. **Last audited: 2026-07-10** (derived from the §3 baseline; re-audit as work lands).
+Code home: `impulse_app/lib`. **Last audited: 2026-07-11** (branch `app-spec-v1.2`; re-audit as work lands).
 
 | Spec area | Status | Notes |
 |---|---|---|
-| Watch BLE connect + WiFi/settings/schedule/IP-table push (§3) | ✅ | The prototype baseline. |
-| `ScheduleEncoder` wire format (§7.2) | ⚠️ | Matches the firmware **v1** blob; the leading format version byte (`0x02`, firmware spec v0.5 §6.2) is not yet emitted — **lockstep** change with watch + anchor. |
+| Watch BLE connect + WiFi/settings/schedule/IP-table push (§3) | ✅ | The prototype baseline. Settings extended to the v2 6-byte payload (+`settle_window_min`). |
+| `ScheduleEncoder` wire format (§7.2) | ✅ | v2 blob: emits the leading `0x02` version byte and per-event `donning_grace_s u16` (lockstep). Covered by `schedule_encoder_test`. |
 | Anchor toggle (servo) (§8.2) | ✅ | Keep `AnchorToggleResult` handling. |
-| `phoneAway` criteria + docking flow (§4.2, §8.6) | ❌ | |
-| App modes / template registry (§2A) | ❌ | |
-| Goal-first onboarding + onboarder templates (§8.1) | ❌ | |
-| Self-binding delay (§8.9) | ❌ | Interim app-side policy; authoritative home is firmware §9. |
-| Emergency passes (§8.10) | ❌ | Interim app ledger; moves on-watch (firmware §9.6, char `…001B`). |
-| Pending Changes / Emergency Pass characteristics (§6.1 `…001A`/`…001B`) | ❌ | Firmware §9 phases 2–3; probe at runtime. |
-| Live status dashboard (§8.7), proximity/calibration (§8.5), time sync (§8.11), seen anchors (§8.12), notifications (§8.6) | ❌ | Per the §3 gap list. |
-| Debug-menu release gating (§2A.4) | ❌ | |
+| `phoneAway` criteria + docking flow (§4.2, §8.6) | 🟡 | Criteria added (index 4), model/encoder/builder support it; the docking session UI (§8.6) is not built. |
+| App modes / template registry (§2A) | 🟡 | Registry + 4 seed templates (expand/reparse, onboarder metadata), `AppMode` in state; the Normal/Advanced UI + Custom cards + detach UX are not built. |
+| Goal-first onboarding + onboarder templates (§8.1) | 🟡 | Onboarder registry data (problem statements, quick-forms, required anchor roles) ready; the onboarding screens are not built. |
+| Self-binding delay (§8.9) | 🟡 | Full canonical classification + gate + settle floor + pending queue implemented and tested (`SelfBindingPolicy`, `CommitmentPolicyService`); not yet wired into the commitment-edit UI. |
+| Emergency passes (§8.10) | 🟡 | Interim drift ledger + rolling budget + allowance gating + audit trail implemented/tested; passes UI not built. Watch `…001B` spend path probed. |
+| Pending Changes / Emergency Pass characteristics (§6.1 `…001A`/`…001B`) | 🟡 | Runtime probe + parsers/writers implemented in `watch_service`; pending-queue UI rendering pending. |
+| Live status dashboard (§8.7), proximity/calibration (§8.5), time sync (§8.11), seen anchors (§8.12), notifications (§8.6) | 🟡 | Watch Status reparsed to spec §6.1 (u8 battery, `condition_met`, unreachable anchors); Time `…0019` write + probe done. Dashboard/calibration/notification UIs not built. |
+| Debug-menu release gating (§2A.4) | 🟡 | `BuildConfig.debugWriteToolsEnabled` compile-time gate provided; no write tools exist in the debug screen yet to gate. |
+| Integrity stores (drift) + reactive state (§2) | ✅ | `drift` pending-queue/pass-ledger/audit-trail (`IntegrityStore`, tested) + Provider `AppState`. |
 
 Legend: ✅ implemented · 🟡 partial · ⚠️ diverges from spec · ❌ not started
 
