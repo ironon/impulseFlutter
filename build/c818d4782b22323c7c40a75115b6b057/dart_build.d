@@ -1,0 +1,1 @@
+ /home/ironon/Impulse/FlutterApp/impulse_app/build/c818d4782b22323c7c40a75115b6b057/dart_build_result.json: 
