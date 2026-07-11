@@ -5,9 +5,12 @@ import 'package:flutter/foundation.dart';
 import '../data/app_database.dart';
 import '../models/automation_model.dart';
 import '../services/automation_service.dart';
+import '../services/commitment_policy_service.dart';
 import '../services/integrity_store.dart';
+import '../services/settle_state_store.dart';
 import '../services/watch_service.dart';
 import '../services/self_binding_policy.dart';
+import '../templates/template_registry.dart';
 
 /// App modes (§2A). Normal is the default friendly template layer; Advanced is
 /// the raw-block power-user surface with the debug menu.
@@ -28,6 +31,20 @@ class AppState extends ChangeNotifier {
   final IntegrityStore _integrity;
   final WatchService _watch;
   final AutomationService _automations;
+
+  /// Registry-driven templates (§2A) — the Normal-mode UI + onboarding gallery
+  /// are generated from this.
+  final TemplateRegistry registry = TemplateRegistry.seeded();
+
+  /// Interim per-event settle state (§8.9).
+  final SettleStateStore settleStore = SettleStateStore();
+
+  late final CommitmentPolicyService policy = CommitmentPolicyService(
+    integrity: _integrity,
+    settleStore: settleStore,
+    config: _policyConfig,
+    passAllowance: _passAllowance,
+  );
 
   IntegrityStore get integrity => _integrity;
 
@@ -60,6 +77,7 @@ class AppState extends ChangeNotifier {
 
   Future<void> initialize() async {
     await _automations.initialize();
+    await settleStore.load();
     _statusSub = _watch.statusStream.listen((s) {
       _status = s;
       notifyListeners();

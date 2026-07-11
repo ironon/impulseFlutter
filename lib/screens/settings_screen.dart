@@ -118,8 +118,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
     if (!_watchService.isConnected) { _show('Watch not connected'); return; }
     _busy(true);
     try {
-      final ok = await _watchService.pushSchedule(_autoService.automations);
-      _show(ok ? 'Schedule pushed ✓' : 'Schedule rejected by watch');
+      final result = await _watchService.pushSchedule(_autoService.automations);
+      _show(result.userMessage);
     } catch (e) { _show('Error: $e'); }
     _busy(false);
   }
