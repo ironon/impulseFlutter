@@ -106,6 +106,7 @@ class AutomationBlock extends StatelessWidget {
       case Criteria.stayNear:   return 'Stay Near';
       case Criteria.getOnWifi:  return 'Get on WiFi';
       case Criteria.getOffWifi: return 'Get off WiFi';
+      case Criteria.phoneAway:  return 'Phone Away';
     }
   }
 
