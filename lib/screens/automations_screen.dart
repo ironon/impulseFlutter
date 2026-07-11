@@ -64,7 +64,11 @@ class _AutomationsScreenState extends State<AutomationsScreen> {
         children: [
           _buildDateNavigator(),
           Expanded(
-            child: _buildCalendarView(automationsForDate, layouts, pendingIds),
+    
+            child: SingleChildScrollView(
+              scrollDirection: Axis.vertical,
+              child: _buildCalendarView(automationsForDate, layouts, pendingIds),
+            ),
           ),
         ],
       ),
@@ -125,6 +129,7 @@ class _AutomationsScreenState extends State<AutomationsScreen> {
     Set<String> pendingIds,
   ) {
     return Row(
+
       children: [
         // Time labels column
         SizedBox(
