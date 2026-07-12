@@ -10,6 +10,7 @@ import 'state/app_state.dart';
 import 'screens/devices_screen.dart';
 import 'screens/automations_screen.dart';
 import 'screens/commitments_screen.dart';
+import 'screens/onboarding_flow.dart';
 import 'screens/settings_screen.dart';
 import 'screens/debug_screen.dart';
 
@@ -78,6 +79,12 @@ class _MainScreenState extends State<MainScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // First run: goal-first onboarding (§8.1). Skippable ("just exploring");
+    // re-enterable later from Commitments as "add another goal".
+    final onboarded =
+        context.select<AppState, bool>((s) => s.onboardingDone);
+    if (!onboarded) return const OnboardingFlow();
+
     final advanced =
         context.select<AppState, bool>((s) => s.advancedMode);
 

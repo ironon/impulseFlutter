@@ -5,6 +5,7 @@ import 'package:flutter_blue_plus/flutter_blue_plus.dart' as fbp;
 import 'package:provider/provider.dart';
 
 import '../models/bluetooth_device_model.dart';
+import '../services/anchor_service.dart';
 import '../services/bluetooth_service.dart';
 import '../services/watch_service.dart';
 import '../services/automation_service.dart';
@@ -162,25 +163,10 @@ class _DevicesScreenState extends State<DevicesScreen> {
       return;
     }
     setState(() => _statusMsg = 'Connecting to anchor…');
-    try {
-      final fbpDevice = fbp.BluetoothDevice.fromId(anchor.bleRemoteId!);
-      await fbpDevice.connect(timeout: const Duration(seconds: 8));
-      final services = await fbpDevice.discoverServices();
-      for (final svc in services) {
-        if (svc.serviceUuid.str.toLowerCase() == '4a0f0001-f8ce-11ee-8001-020304050607') {
-          final idChar = svc.characteristics.firstWhere(
-            (c) => c.characteristicUuid.str.toLowerCase() ==
-                   '4a0f0002-f8ce-11ee-8001-020304050607',
-          );
-          await idChar.write([0x01], withoutResponse: true);
-          break;
-        }
-      }
-      await fbpDevice.disconnect();
-      setState(() => _statusMsg = 'Anchor should beep now');
-    } catch (e) {
-      setState(() => _statusMsg = 'Identify failed: $e');
-    }
+    final ok = await AnchorService().identify(anchor.bleRemoteId!);
+    if (!mounted) return;
+    setState(() =>
+        _statusMsg = ok ? 'Anchor should beep now' : 'Identify failed');
   }
 
   // ── Build ─────────────────────────────────────────────────────────────────

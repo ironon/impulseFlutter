@@ -13,6 +13,36 @@ class AnchorService {
   factory AnchorService() => _instance;
   AnchorService._internal();
 
+  /// Connects to the anchor and writes the Identify characteristic so it
+  /// beeps (~800 ms) — the "which physical anchor is this" affordance.
+  /// Returns true when the write went out.
+  Future<bool> identify(String bleRemoteId) async {
+    final fbpDevice = fbp.BluetoothDevice.fromId(bleRemoteId);
+    try {
+      await fbpDevice.connect(timeout: const Duration(seconds: 8));
+      final services = await fbpDevice.discoverServices();
+      var wrote = false;
+      for (final svc in services) {
+        if (svc.serviceUuid.str.toLowerCase() ==
+            BleConstants.anchorServiceUuid) {
+          for (final c in svc.characteristics) {
+            if (c.characteristicUuid.str.toLowerCase() ==
+                BleConstants.anchorIdentifyCharUuid) {
+              await c.write([0x01], withoutResponse: true);
+              wrote = true;
+              break;
+            }
+          }
+        }
+      }
+      await fbpDevice.disconnect();
+      return wrote;
+    } catch (_) {
+      try { await fbpDevice.disconnect(); } catch (_) {}
+      return false;
+    }
+  }
+
   /// Connects to the anchor with [bleRemoteId], writes [value] (0=close, 1=open)
   /// to the toggle characteristic, and returns the firmware's response.
   Future<AnchorToggleResult> sendToggle(String bleRemoteId, int value) async {

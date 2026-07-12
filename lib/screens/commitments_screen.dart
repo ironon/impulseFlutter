@@ -7,6 +7,7 @@ import '../templates/template.dart';
 import '../theme/app_theme.dart';
 import '../widgets/policy_verdict.dart';
 import '../widgets/template_builder_modal.dart';
+import 'onboarding_flow.dart';
 import 'pending_changes_screen.dart';
 
 /// Normal-mode commitments view (§2A): friendly template cards grouped by
@@ -36,6 +37,13 @@ class CommitmentsScreen extends StatelessWidget {
       appBar: AppBar(
         title: const Text('Commitments'),
         actions: [
+          IconButton(
+            tooltip: 'Add another goal',
+            icon: const Icon(Icons.flag_outlined),
+            onPressed: () => Navigator.of(context).push(MaterialPageRoute(
+                builder: (_) =>
+                    const OnboardingFlow(startAtGoalPicker: true))),
+          ),
           IconButton(
             tooltip: 'Pending changes',
             icon: Badge(
