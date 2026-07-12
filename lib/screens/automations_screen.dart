@@ -63,7 +63,7 @@ class _AutomationsScreenState extends State<AutomationsScreen> {
       body: Column(
         children: [
           _buildDateNavigator(),
-          SingleChildScrollView(
+          Expanded(
     
             child:_buildCalendarView(automationsForDate, layouts, pendingIds),
           ),
