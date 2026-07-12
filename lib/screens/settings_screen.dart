@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../services/watch_service.dart';
 import '../services/bluetooth_service.dart';
 import '../services/automation_service.dart';
+import '../state/app_state.dart';
 import '../theme/app_theme.dart';
 
 class SettingsScreen extends StatefulWidget {
@@ -164,6 +166,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
         children: [
           if (_msg != null) _banner(_msg!),
 
+          // ── App mode (§2A) ─────────────────────────────────────────────
+          _section('App Mode'),
+          _buildModeCard(),
+
+          const SizedBox(height: 24),
+
           // ── Watch connection status ────────────────────────────────────
           _section('Watch Connection'),
           Card(
@@ -229,13 +237,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
               child: Column(
                 children: [
                   _toggle(
-                    'Enforce when disconnected from phone',
+                    'Hold the line when disconnected from phone',
                     _disconnectedIsDormant,
                     (v) => setState(() => _disconnectedIsDormant = v),
                   ),
                   const Divider(color: AppTheme.cardGrey),
                   _toggle(
-                    'Enforce when on WiFi but no BLE',
+                    'Hold the line when on WiFi but no BLE',
                     _awayIsDormant,
                     (v) => setState(() => _awayIsDormant = v),
                   ),
@@ -352,6 +360,93 @@ class _SettingsScreenState extends State<SettingsScreen> {
         child: Text(msg,
             style: const TextStyle(color: AppTheme.textWhite, fontSize: 13)),
       );
+
+  // ── App mode (§2A.3) ───────────────────────────────────────────────────
+
+  Widget _buildModeCard() {
+    final app = context.watch<AppState>();
+    final advanced = app.advancedMode;
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('Advanced mode',
+                          style: TextStyle(
+                              color: AppTheme.textWhite, fontSize: 14)),
+                      SizedBox(height: 2),
+                      Text(
+                        'See and edit the raw building blocks the watch runs, '
+                        'plus the debug menu.',
+                        style:
+                            TextStyle(color: AppTheme.textGrey, fontSize: 12),
+                      ),
+                    ],
+                  ),
+                ),
+                Switch(
+                  value: advanced,
+                  activeTrackColor: AppTheme.lightOrange,
+                  onChanged: (v) => _setMode(v),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _setMode(bool advanced) async {
+    final app = context.read<AppState>();
+    if (!advanced) {
+      await app.setMode(AppMode.normal);
+      return;
+    }
+    // Light confirmation the first time Advanced is entered (§2A.3).
+    if (!app.advancedIntroSeen) {
+      final ok = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: AppTheme.darkGrey,
+          title: const Text('The raw building blocks',
+              style: TextStyle(color: AppTheme.textWhite, fontSize: 18)),
+          content: const Text(
+            'Advanced mode shows commitments exactly as the watch sees them — '
+            'every template becomes its underlying blocks. More power, more '
+            'rope.',
+            style: TextStyle(color: AppTheme.textGrey, fontSize: 13),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(false),
+              child: const Text('Not now',
+                  style: TextStyle(color: AppTheme.textGrey)),
+            ),
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: AppTheme.lightOrange,
+                foregroundColor: AppTheme.darkGrey,
+              ),
+              onPressed: () => Navigator.of(ctx).pop(true),
+              child: const Text('Show me'),
+            ),
+          ],
+        ),
+      );
+      if (ok != true) return;
+      await app.markAdvancedIntroSeen();
+    }
+    await app.setMode(AppMode.advanced);
+  }
 
   Widget _section(String title) => Padding(
         padding: const EdgeInsets.only(bottom: 8),

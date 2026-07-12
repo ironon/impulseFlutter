@@ -9,6 +9,7 @@ import 'services/watch_service.dart';
 import 'state/app_state.dart';
 import 'screens/devices_screen.dart';
 import 'screens/automations_screen.dart';
+import 'screens/commitments_screen.dart';
 import 'screens/settings_screen.dart';
 import 'screens/debug_screen.dart';
 
@@ -51,13 +52,6 @@ class _MainScreenState extends State<MainScreen> {
   final _btService    = BluetoothService();
   final _watchService = WatchService();
 
-  final List<Widget> _screens = [
-    const DevicesScreen(),
-    const AutomationsScreen(),
-    const SettingsScreen(),
-    const DebugScreen(),
-  ];
-
   @override
   void initState() {
     super.initState();
@@ -84,8 +78,40 @@ class _MainScreenState extends State<MainScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final advanced =
+        context.select<AppState, bool>((s) => s.advancedMode);
+
+    // Normal mode: friendly template cards. Advanced: raw blocks + Debug tab.
+    // Switching modes never changes what the watch runs — only how it renders.
+    final screens = <Widget>[
+      const DevicesScreen(),
+      advanced ? const AutomationsScreen() : const CommitmentsScreen(),
+      const SettingsScreen(),
+      if (advanced) const DebugScreen(),
+    ];
+    final items = <BottomNavigationBarItem>[
+      const BottomNavigationBarItem(
+        icon: Icon(Icons.bluetooth),
+        label: 'Devices',
+      ),
+      BottomNavigationBarItem(
+        icon: Icon(advanced ? Icons.grid_view : Icons.self_improvement),
+        label: advanced ? 'Blocks' : 'Commitments',
+      ),
+      const BottomNavigationBarItem(
+        icon: Icon(Icons.settings),
+        label: 'Settings',
+      ),
+      if (advanced)
+        const BottomNavigationBarItem(
+          icon: Icon(Icons.bug_report_outlined),
+          label: 'Debug',
+        ),
+    ];
+    if (_currentIndex >= screens.length) _currentIndex = screens.length - 1;
+
     return Scaffold(
-      body: _screens[_currentIndex],
+      body: screens[_currentIndex],
       bottomNavigationBar: BottomNavigationBar(
         currentIndex: _currentIndex,
         onTap: (index) {
@@ -93,24 +119,7 @@ class _MainScreenState extends State<MainScreen> {
             _currentIndex = index;
           });
         },
-        items: const [
-          BottomNavigationBarItem(
-            icon: Icon(Icons.bluetooth),
-            label: 'Devices',
-          ),
-          BottomNavigationBarItem(
-            icon: Icon(Icons.settings_suggest),
-            label: 'Automations',
-          ),
-          BottomNavigationBarItem(
-            icon: Icon(Icons.settings),
-            label: 'Settings',
-          ),
-          BottomNavigationBarItem(
-            icon: Icon(Icons.bug_report_outlined),
-            label: 'Debug',
-          ),
-        ],
+        items: items,
       ),
     );
   }

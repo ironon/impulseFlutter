@@ -23,7 +23,7 @@ Code home: `impulse_app/lib`. **Last audited: 2026-07-11** (branch `app-spec-v1.
 | `ScheduleEncoder` wire format (§7.2) | ✅ | v2 blob: emits the leading `0x02` version byte and per-event `donning_grace_s u16` (lockstep). Covered by `schedule_encoder_test`. |
 | Anchor toggle (servo) (§8.2) | ✅ | Keep `AnchorToggleResult` handling. |
 | `phoneAway` criteria + docking flow (§4.2, §8.6) | 🟡 | Criteria added (index 4), model/encoder/builder support it; the docking session UI (§8.6) is not built. |
-| App modes / template registry (§2A) | 🟡 | Registry + 4 seed templates (expand/reparse, onboarder metadata), `AppMode` in state; the Normal/Advanced UI + Custom cards + detach UX are not built. |
+| App modes / template registry (§2A) | ✅ | Registry + 4 seed templates; Settings mode toggle (Normal default, first-entry Advanced confirmation); Normal mode = registry-generated gallery + templateInstanceId-grouped cards + read-only Custom cards + drafts; Advanced = raw-block day view with origin labels, detach-to-manual on edit, Debug tab. Audited 2026-07-11. |
 | Goal-first onboarding + onboarder templates (§8.1) | 🟡 | Onboarder registry data (problem statements, quick-forms, required anchor roles) ready; the onboarding screens are not built. |
 | Self-binding delay (§8.9) | 🟡 | Full canonical classification + gate + settle floor + pending queue implemented and tested (`SelfBindingPolicy`, `CommitmentPolicyService`); not yet wired into the commitment-edit UI. |
 | Emergency passes (§8.10) | 🟡 | Interim drift ledger + rolling budget + allowance gating + audit trail implemented/tested; passes UI not built. Watch `…001B` spend path probed. |

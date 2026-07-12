@@ -52,7 +52,7 @@ class _DeviceSettingsModalState extends State<DeviceSettingsModal> {
         case AnchorToggleResult.success:
           _statusMsg = value == 1 ? 'Anchor opened.' : 'Anchor closed.';
         case AnchorToggleResult.rejected:
-          _statusMsg = 'Cannot open: anchor is in an active enforcement event.';
+          _statusMsg = 'Can\'t open right now — this anchor is holding an active commitment.';
         case AnchorToggleResult.connectionError:
           _statusMsg = 'Could not connect to anchor. Make sure it is nearby and powered on.';
       }
@@ -148,7 +148,7 @@ class _DeviceSettingsModalState extends State<DeviceSettingsModal> {
             const SizedBox(height: 8),
             const Text(
               'Open the anchor strap lock to reposition the anchor. '
-              'The lock cannot be opened during an active enforcement event.',
+              'The lock stays closed while a commitment that uses this anchor is running.',
               style: TextStyle(color: AppTheme.textGrey, fontSize: 13),
             ),
             const SizedBox(height: 16),

@@ -12,23 +12,38 @@ import 'package:impulse_app/state/app_state.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
-  SharedPreferences.setMockInitialValues({});
+
+  late AppDatabase db;
+  late AppState appState;
+
+  setUp(() async {
+    SharedPreferences.setMockInitialValues({});
+    db = AppDatabase.forTesting(NativeDatabase.memory());
+    appState = AppState(integrityStore: IntegrityStore(db));
+    await appState.initialize();
+  });
+
+  tearDown(() async {
+    await db.close();
+  });
 
   testWidgets('App smoke test', (WidgetTester tester) async {
-    final db = AppDatabase.forTesting(NativeDatabase.memory());
-    final appState = AppState(integrityStore: IntegrityStore(db));
-    await appState.initialize();
-
     await tester.pumpWidget(ImpulseApp(appState: appState));
 
     expect(find.byType(BottomNavigationBar), findsOneWidget);
-    expect(find.text('Automations'), findsWidgets);
+    // Normal mode is the default: friendly Commitments tab, no Debug tab.
+    expect(find.text('Commitments'), findsWidgets);
     expect(find.text('Settings'), findsWidgets);
+    expect(find.text('Debug'), findsNothing);
 
-    await tester.tap(find.text('Automations').first);
+    await tester.tap(find.text('Commitments').first);
     await tester.pumpAndSettle();
     expect(find.byType(FloatingActionButton), findsOneWidget);
 
-    await db.close();
+    // Advanced mode reveals the raw-block view and the Debug tab.
+    await appState.setMode(AppMode.advanced);
+    await tester.pumpAndSettle();
+    expect(find.text('Blocks'), findsWidgets);
+    expect(find.text('Debug'), findsWidgets);
   });
 }
