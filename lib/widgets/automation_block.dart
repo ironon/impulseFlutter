@@ -14,11 +14,19 @@ class AutomationBlock extends StatelessWidget {
   /// Honest origin label shown in Advanced mode ("Sunrise Lock" / "manual").
   final bool showOrigin;
 
+  /// Width of the hour-label gutter this block sits to the right of.
+  final double gutterWidth;
+
+  /// Width available for the block columns (timeline width minus gutter).
+  final double gridWidth;
+
   const AutomationBlock({
     super.key,
     required this.automation,
     required this.layout,
     required this.onTap,
+    required this.gutterWidth,
+    required this.gridWidth,
     this.hasPendingChange = false,
     this.showOrigin = false,
   });
@@ -32,10 +40,9 @@ class AutomationBlock extends StatelessWidget {
 
     return Positioned(
       top:    automation.startMinutes.toDouble(),
-      left:   (layout.columnIndex / layout.totalColumns) *
-              MediaQuery.of(context).size.width * 0.85,
-      width:  (1 / layout.totalColumns) *
-              MediaQuery.of(context).size.width * 0.85,
+      left:   gutterWidth +
+              (layout.columnIndex / layout.totalColumns) * gridWidth,
+      width:  (1 / layout.totalColumns) * gridWidth,
       height: dur.toDouble(),
       child: GestureDetector(
         onTap: onTap,

@@ -26,10 +26,23 @@ class _AutomationsScreenState extends State<AutomationsScreen> {
   final AutomationService _automationService = AutomationService();
   late DateTime _selectedDate;
 
+  /// Starts the day view around two hours before now (clamped), so the
+  /// current part of the day is visible on open.
+  late final ScrollController _scrollController = ScrollController(
+    initialScrollOffset:
+        ((DateTime.now().hour - 2) * 60.0).clamp(0.0, 18 * 60.0),
+  );
+
   @override
   void initState() {
     super.initState();
     _selectedDate = DateTime.now();
+  }
+
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
   }
 
   @override
@@ -120,62 +133,60 @@ class _AutomationsScreenState extends State<AutomationsScreen> {
     );
   }
 
+  /// One scrollable coordinate space: hour labels, hour dividers, and the
+  /// timeblocks all live inside a single fixed-height (24 × 60 px) Stack, so
+  /// scrolling moves everything together. (Separate ListViews + a
+  /// viewport-sized Stack made the Positioned blocks ignore scrolling.)
   Widget _buildCalendarView(
     List<Automation> automations,
     Map<String, AutomationLayout> layouts,
     Set<String> pendingIds,
   ) {
-    return Row(
+    const gutterWidth = 60.0;
+    const timelineHeight = 24 * 60.0; // 1 px per minute
 
-      children: [
-        // Time labels column
-        SizedBox(
-          width: 60,
-          child: ListView.builder(
-            itemCount: 24,
-            physics: const NeverScrollableScrollPhysics(),
-            itemBuilder: (context, index) {
-              return SizedBox(
-                height: 60,
-                child: Center(
-                  child: Text(
-                    _formatHour(index),
-                    style: const TextStyle(
-                      color: AppTheme.textGrey,
-                      fontSize: 12,
+    return LayoutBuilder(builder: (context, constraints) {
+      final gridWidth = constraints.maxWidth - gutterWidth;
+      return SingleChildScrollView(
+        controller: _scrollController,
+        child: SizedBox(
+          height: timelineHeight,
+          width: constraints.maxWidth,
+          child: Stack(
+            children: [
+              // Hour dividers + labels (one coordinate space with the blocks)
+              for (int hour = 0; hour < 24; hour++) ...[
+                Positioned(
+                  top: hour * 60.0,
+                  left: gutterWidth,
+                  right: 0,
+                  child: Container(height: 1, color: AppTheme.cardGrey),
+                ),
+                Positioned(
+                  top: hour * 60.0,
+                  left: 0,
+                  width: gutterWidth,
+                  height: 60,
+                  child: Center(
+                    child: Text(
+                      _formatHour(hour),
+                      style: const TextStyle(
+                        color: AppTheme.textGrey,
+                        fontSize: 12,
+                      ),
                     ),
                   ),
                 ),
-              );
-            },
-          ),
-        ),
-        // Calendar grid
-        Expanded(
-          child: Stack(
-            children: [
-              // Hour dividers
-              ListView.builder(
-                itemCount: 24,
-                physics: const NeverScrollableScrollPhysics(),
-                itemBuilder: (context, index) {
-                  return Container(
-                    height: 60,
-                    decoration: const BoxDecoration(
-                      border: Border(
-                        top: BorderSide(color: AppTheme.cardGrey, width: 1),
-                      ),
-                    ),
-                  );
-                },
-              ),
-              // Automation blocks
+              ],
+              // Timeblocks, positioned on the same timeline
               ...automations.map((automation) {
                 final layout = layouts[automation.id];
                 if (layout == null) return const SizedBox();
                 return AutomationBlock(
                   automation: automation,
                   layout: layout,
+                  gutterWidth: gutterWidth,
+                  gridWidth: gridWidth,
                   hasPendingChange: pendingIds.contains(automation.id),
                   showOrigin: true,
                   onTap: () => _editAutomation(automation),
@@ -184,8 +195,8 @@ class _AutomationsScreenState extends State<AutomationsScreen> {
             ],
           ),
         ),
-      ],
-    );
+      );
+    });
   }
 
   String _formatHour(int hour) {
