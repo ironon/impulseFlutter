@@ -10,6 +10,7 @@ import 'state/app_state.dart';
 import 'screens/devices_screen.dart';
 import 'screens/automations_screen.dart';
 import 'screens/commitments_screen.dart';
+import 'screens/home_screen.dart';
 import 'screens/onboarding_flow.dart';
 import 'screens/settings_screen.dart';
 import 'screens/debug_screen.dart';
@@ -88,22 +89,28 @@ class _MainScreenState extends State<MainScreen> {
     final advanced =
         context.select<AppState, bool>((s) => s.advancedMode);
 
-    // Normal mode: friendly template cards. Advanced: raw blocks + Debug tab.
-    // Switching modes never changes what the watch runs — only how it renders.
+    // Day-first Home leads (§8.7). Normal mode: friendly template cards.
+    // Advanced: raw blocks + Debug tab. Switching modes never changes what
+    // the watch runs — only how it renders.
     final screens = <Widget>[
-      const DevicesScreen(),
+      const HomeScreen(),
       advanced ? const AutomationsScreen() : const CommitmentsScreen(),
+      const DevicesScreen(),
       const SettingsScreen(),
       if (advanced) const DebugScreen(),
     ];
     final items = <BottomNavigationBarItem>[
       const BottomNavigationBarItem(
-        icon: Icon(Icons.bluetooth),
-        label: 'Devices',
+        icon: Icon(Icons.today),
+        label: 'Today',
       ),
       BottomNavigationBarItem(
         icon: Icon(advanced ? Icons.grid_view : Icons.self_improvement),
         label: advanced ? 'Blocks' : 'Commitments',
+      ),
+      const BottomNavigationBarItem(
+        icon: Icon(Icons.bluetooth),
+        label: 'Devices',
       ),
       const BottomNavigationBarItem(
         icon: Icon(Icons.settings),
