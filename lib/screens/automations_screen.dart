@@ -60,15 +60,15 @@ class _AutomationsScreenState extends State<AutomationsScreen> {
           ),
         ],
       ),
-      body: SingleChildScrollView(
-        child:Column(
+      body: Column(
         children: [
           _buildDateNavigator(),
           SingleChildScrollView(
-            child: _buildCalendarView(automationsForDate, layouts, pendingIds),
+    
+            child:_buildCalendarView(automationsForDate, layouts, pendingIds),
           ),
         ],
-      )),
+      ),
       floatingActionButton: FloatingActionButton(
         onPressed: _addAutomation,
         backgroundColor: AppTheme.lightOrange,
