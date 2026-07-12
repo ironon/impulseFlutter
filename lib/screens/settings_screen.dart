@@ -7,6 +7,8 @@ import '../services/bluetooth_service.dart';
 import '../services/automation_service.dart';
 import '../state/app_state.dart';
 import '../theme/app_theme.dart';
+import 'passes_screen.dart';
+import 'pending_changes_screen.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
@@ -169,6 +171,49 @@ class _SettingsScreenState extends State<SettingsScreen> {
           // ── App mode (§2A) ─────────────────────────────────────────────
           _section('App Mode'),
           _buildModeCard(),
+
+          const SizedBox(height: 24),
+
+          // ── Self-binding (§8.9/§8.10) ──────────────────────────────────
+          _section('Self-Binding'),
+          Card(
+            child: Column(
+              children: [
+                ListTile(
+                  leading: const Icon(Icons.confirmation_num_outlined,
+                      color: AppTheme.lightOrange),
+                  title: const Text('Emergency passes',
+                      style:
+                          TextStyle(color: AppTheme.textWhite, fontSize: 14)),
+                  subtitle: const Text(
+                      'Skip a day when life happens — plus the free-edit '
+                      'window and history.',
+                      style:
+                          TextStyle(color: AppTheme.textGrey, fontSize: 12)),
+                  trailing: const Icon(Icons.chevron_right,
+                      color: AppTheme.textGrey),
+                  onTap: () => Navigator.of(context).push(MaterialPageRoute(
+                      builder: (_) => const PassesScreen())),
+                ),
+                const Divider(height: 1, color: AppTheme.backgroundGrey),
+                ListTile(
+                  leading:
+                      const Icon(Icons.hourglass_top, color: Colors.amber),
+                  title: const Text('Pending changes',
+                      style:
+                          TextStyle(color: AppTheme.textWhite, fontSize: 14)),
+                  subtitle: const Text(
+                      'Easings waiting out their day before they apply.',
+                      style:
+                          TextStyle(color: AppTheme.textGrey, fontSize: 12)),
+                  trailing: const Icon(Icons.chevron_right,
+                      color: AppTheme.textGrey),
+                  onTap: () => Navigator.of(context).push(MaterialPageRoute(
+                      builder: (_) => const PendingChangesScreen())),
+                ),
+              ],
+            ),
+          ),
 
           const SizedBox(height: 24),
 
