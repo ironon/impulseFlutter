@@ -30,7 +30,7 @@ Code home: `impulse_app/lib`. **Last audited: 2026-07-11** (branch `app-spec-v1.
 | Pending Changes / Emergency Pass characteristics (§6.1 `…001A`/`…001B`) | ✅ | Runtime probe + parsers/writers in `watch_service`; PendingChangesScreen renders the watch queue when present (with the app queue as fallback); pass spends prefer `…001B`. Audited 2026-07-11. |
 | Live status dashboard (§8.7) + seen anchors (§8.12) | ✅ | Day-first Home tab: today's timeline with the active commitment highlighted, alarming-vs-on-track from `condition_met`, watch vitals (worn/activity/battery/WiFi), unreachable-anchor notices, anchor reachability from Seen Anchors + phone scans. Audited 2026-07-11. |
 | Proximity/calibration (§8.5), time sync UI (§8.11), notifications (§8.6) | 🟡 | Time `…0019` write + probe done (pushed on pairing); calibration donut and dock notifications not built (next phase). |
-| Debug-menu release gating (§2A.4) | 🟡 | `BuildConfig.debugWriteToolsEnabled` compile-time gate provided; no write tools exist in the debug screen yet to gate. |
+| Debug menu + release gating (§2A.4, §8.13) | ✅ | Advanced-only tabbed debug menu: decoded Watch Status + characteristic probes, live Prox Score / Dock Status meters (short anchor telemetry sessions), raw BLE log; write tools (manual characteristic write, force re-push, time write, fingerprint-upload stub) compile-time gated behind `BuildConfig.debugWriteToolsEnabled` (dev builds only). Audited 2026-07-11. |
 | Integrity stores (drift) + reactive state (§2) | ✅ | `drift` pending-queue/pass-ledger/audit-trail (`IntegrityStore`, tested) + Provider `AppState`. |
 
 Legend: ✅ implemented · 🟡 partial · ⚠️ diverges from spec · ❌ not started
