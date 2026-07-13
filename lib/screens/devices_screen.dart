@@ -12,6 +12,7 @@ import '../services/automation_service.dart';
 import '../state/app_state.dart';
 import '../theme/app_theme.dart';
 import '../widgets/device_settings_modal.dart';
+import 'calibration_screen.dart';
 
 class DevicesScreen extends StatefulWidget {
   const DevicesScreen({super.key});
@@ -426,6 +427,15 @@ class _DevicesScreenState extends State<DevicesScreen> {
                   color: AppTheme.lightOrange),
               tooltip: 'Identify (beep)',
               onPressed: () => _identifyAnchor(anchor),
+            ),
+            IconButton(
+              icon: const Icon(Icons.track_changes,
+                  color: AppTheme.textGrey),
+              tooltip: 'Calibrate closeness',
+              onPressed: anchor.bleRemoteId == null
+                  ? null
+                  : () => Navigator.of(context).push(MaterialPageRoute(
+                      builder: (_) => CalibrationScreen(anchor: anchor))),
             ),
             IconButton(
               icon: const Icon(Icons.settings_outlined,
