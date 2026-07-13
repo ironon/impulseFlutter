@@ -92,14 +92,29 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Future<void> _pushSettings() async {
     if (!_watchService.isConnected) { _show('Watch not connected'); return; }
     _busy(true);
+    final app = context.read<AppState>();
     try {
       await _savePrefsLocally();
-      final ok = await _watchService.pushSettings(
+      final resp = await _watchService.pushSettings(
         disconnectedIsDormant: _disconnectedIsDormant,
         awayIsDormant:         _awayIsDormant,
         tzOffsetMinutes:       _tzOffsetMin,
+        settleWindowMin: app.policy.config.settleWindow.inMinutes,
       );
-      _show(ok ? 'Settings saved on watch ✓' : 'Watch returned error');
+      // Honest responses (firmware §9.7/§9.8): 0x03 = loosening fields
+      // quarantined; 0x02 = tz change refused during the active window.
+      switch (resp) {
+        case 0x01:
+          _show('Settings saved on watch ✓');
+        case 0x03:
+          _show('Saved — the parts that ease things take effect later');
+          await app.refreshWatchPending();
+        case 0x02:
+          _show('Timezone change refused — it would cut short a commitment '
+              'that\'s running right now');
+        default:
+          _show('Couldn\'t reach the watch — try again');
+      }
     } catch (e) { _show('Error: $e'); }
     _busy(false);
   }

@@ -353,8 +353,28 @@ class AppState extends ChangeNotifier {
   Future<int> changePassAllowance(int allowance) async {
     final v = await policy.changeAllowance(allowance);
     await _persistPolicyValues();
+    // Mirror to the on-watch ledger when it exists (…001B SET_ALLOWANCE):
+    // the watch applies the same rule — 0x01 lower applied, 0x03 raise
+    // quarantined into its own pending queue.
+    if (_watch.isConnected && _watch.hasEmergencyPassCharacteristic) {
+      final resp = await _watch.setEmergencyPassAllowance(allowance);
+      if (resp == 0x03) await refreshWatchPending();
+    }
     notifyListeners();
     return v;
+  }
+
+  /// Read the on-watch pass ledger for display. Null when absent — the
+  /// interim app ledger is then the shown source.
+  Future<WatchPassLedger?> readWatchPassLedger() async {
+    if (!_watch.isConnected || !_watch.hasEmergencyPassCharacteristic) {
+      return null;
+    }
+    try {
+      return await _watch.readEmergencyPassLedger();
+    } catch (_) {
+      return null;
+    }
   }
 
   Future<void> changeSettleWindow(int minutes) async {

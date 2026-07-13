@@ -165,6 +165,24 @@ extension ScheduleEndResultX on ScheduleEndResult {
   }
 }
 
+/// The on-watch emergency-pass ledger snapshot (`…001B` Read, firmware §9.6):
+/// allowance, passes remaining, and a regen countdown per in-window spend.
+class WatchPassLedger {
+  final int allowance;
+  final int remaining;
+  final List<Duration> regenCountdowns;
+  const WatchPassLedger({
+    required this.allowance,
+    required this.remaining,
+    required this.regenCountdowns,
+  });
+
+  /// The soonest regeneration, or null when nothing is spent.
+  Duration? get nextRegen => regenCountdowns.isEmpty
+      ? null
+      : regenCountdowns.reduce((a, b) => a < b ? a : b);
+}
+
 /// One entry from the watch's authoritative Pending Changes queue (`…001A`,
 /// firmware §9.5). `secondsUntilApply` is the watch's own countdown.
 class PendingChangeEntry {
@@ -329,8 +347,52 @@ class WatchService {
     return out;
   }
 
+  /// Read the on-watch pass ledger (`…001B`, firmware §9.6):
+  /// `[allowance u8][remaining u8]` then `[seconds_until_regen u32]` per spend
+  /// still in the rolling window. Null when the characteristic is absent.
+  Future<WatchPassLedger?> readEmergencyPassLedger() async {
+    if (_emergencyPassChar == null) return null;
+    final bytes = await _emergencyPassChar!.read();
+    if (bytes.length < 2) return null;
+    final regens = <Duration>[];
+    int pos = 2;
+    while (pos + 4 <= bytes.length) {
+      final secs = ByteData.sublistView(
+              Uint8List.fromList(bytes.sublist(pos, pos + 4)))
+          .getUint32(0, Endian.little);
+      regens.add(Duration(seconds: secs));
+      pos += 4;
+    }
+    return WatchPassLedger(
+      allowance: bytes[0],
+      remaining: bytes[1],
+      regenCountdowns: regens,
+    );
+  }
+
+  /// Set the pass allowance on the watch (`…001B` SET_ALLOWANCE, §9.6):
+  /// `[0x02][allowance u8]`. Response `0x01` = applied (lower/unchanged),
+  /// `0x03` = quarantined (a raise is a loosening). Null when absent/timeout.
+  Future<int?> setEmergencyPassAllowance(int allowance) async {
+    if (_emergencyPassChar == null) return null;
+    final completer = Completer<int?>();
+    late StreamSubscription sub;
+    sub = _emergencyPassChar!.onValueReceived.listen((val) {
+      if (!completer.isCompleted) {
+        completer.complete(val.isNotEmpty ? val[0] : null);
+        sub.cancel();
+      }
+    });
+    await _emergencyPassChar!.setNotifyValue(true);
+    await _emergencyPassChar!
+        .write([0x02, allowance & 0xFF], withoutResponse: false);
+    return completer.future.timeout(const Duration(seconds: 5),
+        onTimeout: () { sub.cancel(); return null; });
+  }
+
   /// Spend an emergency pass on the watch ledger (`…001B`, §9.6):
   /// `[0x01][event uuid 16][date u32 YYYYMMDD]`. Returns (respByte, remaining).
+  /// Response `0x01`+remaining success, `0x02` exhausted, `0x00` malformed.
   /// Returns null if the characteristic is absent (use the interim app ledger).
   Future<({int resp, int? remaining})?> spendEmergencyPass(
       String eventUuid, int dateYyyymmdd) async {
@@ -488,7 +550,11 @@ class WatchService {
   /// Settings payload (v2, 6 bytes — firmware v0.5, lockstep):
   /// `[disconnected_is_dormant u8][away_is_dormant u8][tz_offset int16]
   ///  [settle_window_min u16 (clamped 30–240)]`.
-  Future<bool> pushSettings({
+  /// Returns the response byte: `0x01` applied in full; `0x03` loosening
+  /// fields quarantined (§9.8); `0x02` tz change rejected because it would
+  /// escape the active window (§9.7). Null on timeout — never render `0x03`
+  /// or `0x02` as a plain failure or a full apply.
+  Future<int?> pushSettings({
     required bool disconnectedIsDormant,
     required bool awayIsDormant,
     required int tzOffsetMinutes,
@@ -502,11 +568,11 @@ class WatchService {
     data.setInt16(2, tzOffsetMinutes, Endian.little);
     data.setUint16(4, settleWindowMin.clamp(30, 240), Endian.little);
 
-    final completer = Completer<bool>();
+    final completer = Completer<int?>();
     late StreamSubscription sub;
     sub = _settingsChar!.onValueReceived.listen((val) {
       if (!completer.isCompleted) {
-        completer.complete(val.isNotEmpty && val[0] == 0x01);
+        completer.complete(val.isNotEmpty ? val[0] : null);
         sub.cancel();
       }
     });
@@ -519,7 +585,7 @@ class WatchService {
 
     return completer.future.timeout(
       const Duration(seconds: 5),
-      onTimeout: () { sub.cancel(); return false; },
+      onTimeout: () { sub.cancel(); return null; },
     );
   }
 

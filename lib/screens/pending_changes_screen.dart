@@ -112,11 +112,14 @@ class PendingChangesScreen extends StatelessWidget {
     final eta = DateTime.now().add(Duration(seconds: e.secondsUntilApply));
     final target =
         app.schedule.where((a) => a.id == e.eventUuid).firstOrNull;
+    // Wire mapping (firmware §9.5): 0=delete, 1=loosen-modify,
+    // 2=negate-day, 3=setting change.
     final what = switch (e.changeType) {
-      1 => 'Remove commitment',
+      0 => 'Remove commitment',
+      1 => 'Eased commitment',
       2 => 'Skip one day',
       3 => 'Setting change',
-      _ => 'Eased commitment',
+      _ => 'Pending change',
     };
     return Card(
       margin: const EdgeInsets.only(bottom: 10),

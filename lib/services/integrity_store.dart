@@ -3,8 +3,9 @@ import 'package:drift/drift.dart';
 import '../data/app_database.dart';
 
 /// Mirrors the firmware `change_type` byte of a pending-queue entry
-/// (firmware §9.5). Settings/allowance loosenings use [setting] (type 3).
-enum PendingChangeType { eventModify, eventDelete, negateDay, setting }
+/// (firmware §9.5): 0 = delete, 1 = loosen-modify, 2 = negate-day,
+/// 3 = setting change. **Order matches the wire — do not reorder.**
+enum PendingChangeType { eventDelete, eventModify, negateDay, setting }
 
 /// Transactional wrapper over the drift trust stores (§2, §9, §13): the
 /// pending-changes queue, the emergency-pass ledger and the audit trail.

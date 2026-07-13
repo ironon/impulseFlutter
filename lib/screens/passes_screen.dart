@@ -25,6 +25,10 @@ class _PassesScreenState extends State<PassesScreen> {
   DateTime? _regenAt;
   List<AuditEntryRow> _audit = const [];
 
+  /// True when the numbers come from the watch's own ledger (…001B) — the
+  /// authoritative source once that firmware is present.
+  bool _fromWatch = false;
+
   @override
   void initState() {
     super.initState();
@@ -33,11 +37,24 @@ class _PassesScreenState extends State<PassesScreen> {
 
   Future<void> _refresh() async {
     final app = context.read<AppState>();
-    final remaining = await app.policy.remainingPasses();
-    final regen = await app.integrity.nextPassRegeneratesAt(DateTime.now());
+
+    // Prefer the on-watch ledger (root of trust) when it exists; the interim
+    // app ledger is the fallback.
+    final watchLedger = await app.readWatchPassLedger();
+    int remaining;
+    DateTime? regen;
+    if (watchLedger != null) {
+      remaining = watchLedger.remaining;
+      final next = watchLedger.nextRegen;
+      regen = next == null ? null : DateTime.now().add(next);
+    } else {
+      remaining = await app.policy.remainingPasses();
+      regen = await app.integrity.nextPassRegeneratesAt(DateTime.now());
+    }
     final audit = await app.integrity.auditEntries(limit: 50);
     if (!mounted) return;
     setState(() {
+      _fromWatch = watchLedger != null;
       _remaining = remaining;
       _regenAt = regen;
       _audit = audit;
@@ -255,6 +272,16 @@ class _PassesScreenState extends State<PassesScreen> {
                       textAlign: TextAlign.center,
                       style: const TextStyle(
                           color: AppTheme.textGrey, fontSize: 12),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      _fromWatch
+                          ? 'Counted by the watch itself — reinstalling the '
+                              'app can\'t refill them.'
+                          : 'Counted on this phone until the watch takes over.',
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(
+                          color: AppTheme.textGrey, fontSize: 11),
                     ),
                     const SizedBox(height: 16),
                     SizedBox(
