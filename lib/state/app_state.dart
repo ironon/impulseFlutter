@@ -7,7 +7,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../data/app_database.dart';
 import '../models/automation_model.dart';
+import '../services/anchor_distribution_service.dart';
 import '../services/automation_service.dart';
+import '../services/bluetooth_service.dart';
 import '../services/commitment_policy_service.dart';
 import '../services/integrity_store.dart';
 import '../services/settle_state_store.dart';
@@ -415,9 +417,16 @@ class AppState extends ChangeNotifier {
   /// at the first moment the app can actually re-push.
   Future<ScheduleEndResult?> pushScheduleToWatch() async {
     await promoteDuePending(pushAfter: false);
+    final events = await scheduleForPush();
+
+    // Anchors get the same schedule over WiFi/HTTP, fire-and-forget (§7.3) —
+    // they need it only for beep-on-removal windows; an offline anchor just
+    // misses this push and catches the next one.
+    unawaited(AnchorDistributionService().pushToAllAnchors(events));
+
     if (!_watch.isConnected) return null;
     try {
-      final result = await _watch.pushSchedule(await scheduleForPush());
+      final result = await _watch.pushSchedule(events);
       if (result == ScheduleEndResult.partialQuarantine ||
           result == ScheduleEndResult.rejected) {
         // The watch quarantined/rejected parts — its queue is the truth now.
@@ -427,6 +436,37 @@ class AppState extends ChangeNotifier {
     } catch (_) {
       return ScheduleEndResult.failed;
     }
+  }
+
+  /// App-foreground opportunistic work (§7.3/§8.4/§8.11): promote due
+  /// loosenings, refresh anchor IPs over mDNS (a newly learned IP triggers a
+  /// full anchor push + a watch IP-table refresh), re-push stale anchors
+  /// (last success older than ~12h — deliberately no midnight push), and
+  /// push time to the watch while connected.
+  Future<void> onAppForeground() async {
+    await promoteDuePending(pushAfter: false);
+
+    final dist = AnchorDistributionService();
+    final events = await scheduleForPush();
+    final changed = await dist.refreshAnchorIps();
+    if (changed.isNotEmpty) {
+      await dist.pushToAllAnchors(events);
+      if (_watch.isConnected) {
+        try {
+          await _watch.pushAnchorIpTable(BluetoothService().anchors);
+        } catch (_) {}
+      }
+    } else {
+      await dist.pushStale(events);
+    }
+
+    if (_watch.isConnected && _watch.hasTimeCharacteristic) {
+      try {
+        await _watch.pushTime(DateTime.now().toUtc(),
+            DateTime.now().timeZoneOffset.inMinutes);
+      } catch (_) {}
+    }
+    notifyListeners();
   }
 
   /// Apply any app-side pending entries whose delay has elapsed.

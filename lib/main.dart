@@ -47,7 +47,8 @@ class MainScreen extends StatefulWidget {
   State<MainScreen> createState() => _MainScreenState();
 }
 
-class _MainScreenState extends State<MainScreen> {
+class _MainScreenState extends State<MainScreen>
+    with WidgetsBindingObserver {
   int _currentIndex = 0;
   StreamSubscription<List<SeenAnchorInfo>>? _seenAnchorsSub;
 
@@ -57,6 +58,7 @@ class _MainScreenState extends State<MainScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _seenAnchorsSub = _watchService.seenAnchorsStream.listen((anchors) {
       for (final a in anchors) {
         _btService.addOrUpdateDevice(BluetoothDeviceModel(
@@ -73,7 +75,17 @@ class _MainScreenState extends State<MainScreen> {
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Foreground is a push opportunity (§7.3/§8.4/§8.11): promotions, mDNS
+    // IP refresh, stale anchor pushes, and a time push while connected.
+    if (state == AppLifecycleState.resumed && mounted) {
+      context.read<AppState>().onAppForeground();
+    }
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _seenAnchorsSub?.cancel();
     super.dispose();
   }
