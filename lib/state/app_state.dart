@@ -12,6 +12,7 @@ import '../services/automation_service.dart';
 import '../services/bluetooth_service.dart';
 import '../services/commitment_policy_service.dart';
 import '../services/integrity_store.dart';
+import '../services/notification_service.dart';
 import '../services/settle_state_store.dart';
 import '../services/watch_service.dart';
 import '../services/self_binding_policy.dart';
@@ -173,6 +174,12 @@ class AppState extends ChangeNotifier {
     await settleStore.settleDue(
         schedule, DateTime.now(), policy.config.settleWindow);
     await promoteDuePending(pushAfter: false);
+
+    // Local notifications (§8.6 step 1): dock reminders + window notices for
+    // the coming 48 h, rescheduled on every schedule change and foreground.
+    await NotificationService().init();
+    unawaited(
+        NotificationService().rescheduleWindowNotices(await scheduleForPush()));
 
     notifyListeners();
   }
@@ -424,6 +431,9 @@ class AppState extends ChangeNotifier {
     // misses this push and catches the next one.
     unawaited(AnchorDistributionService().pushToAllAnchors(events));
 
+    // The schedule changed: refresh the coming 48 h of local notices.
+    unawaited(NotificationService().rescheduleWindowNotices(events));
+
     if (!_watch.isConnected) return null;
     try {
       final result = await _watch.pushSchedule(events);
@@ -466,6 +476,9 @@ class AppState extends ChangeNotifier {
             DateTime.now().timeZoneOffset.inMinutes);
       } catch (_) {}
     }
+
+    // Refresh the coming 48 h of local notices while we're at it.
+    unawaited(NotificationService().rescheduleWindowNotices(events));
     notifyListeners();
   }
 
@@ -499,6 +512,8 @@ class AppState extends ChangeNotifier {
           break;
       }
       await _integrity.markPromoted(row.id, now);
+      // §8.9 item 5: promotions are surfaced, not silent.
+      unawaited(NotificationService().notifyPromotion(row.description));
     }
     if (changed && pushAfter) {
       await pushScheduleToWatch();
