@@ -7,10 +7,12 @@ import '../models/automation_model.dart';
 import '../models/bluetooth_device_model.dart';
 import '../services/automation_service.dart';
 import '../services/bluetooth_service.dart';
+import '../services/dock_session_service.dart';
 import '../services/watch_service.dart';
 import '../state/app_state.dart';
 import '../theme/app_theme.dart';
 import '../widgets/policy_verdict.dart';
+import 'dock_session_screen.dart';
 
 /// Day-first Home dashboard (§8.7): today's timeline of commitments with the
 /// active one highlighted (alarming vs. on-track from `condition_met`), then
@@ -36,11 +38,17 @@ class _HomeScreenState extends State<HomeScreen> {
     _seenSub = WatchService().seenAnchorsStream.listen((anchors) {
       if (mounted) setState(() => _seenAnchors = anchors);
     });
+    DockSessionService().addListener(_onDockChanged);
+  }
+
+  void _onDockChanged() {
+    if (mounted) setState(() {});
   }
 
   @override
   void dispose() {
     _seenSub?.cancel();
+    DockSessionService().removeListener(_onDockChanged);
     super.dispose();
   }
 
@@ -64,6 +72,9 @@ class _HomeScreenState extends State<HomeScreen> {
           // ── Active-commitment banner ──
           _activeBanner(app, status, today, now),
           const SizedBox(height: 16),
+
+          // ── Phone-docking prompt (§8.6): imminent or active phoneAway ──
+          ..._dockPrompt(context, today, now),
 
           // ── Today's timeline ──
           const Text('The shape of the day',
@@ -136,6 +147,60 @@ class _HomeScreenState extends State<HomeScreen> {
         ],
       ),
     );
+  }
+
+  // ── Phone-docking prompt (§8.6) ────────────────────────────────────────────
+
+  /// Shows "time to dock your phone" for a phoneAway window that is active or
+  /// starts within ~15 minutes, and a session chip while a dock link is live.
+  List<Widget> _dockPrompt(
+      BuildContext context, List<Automation> today, DateTime now) {
+    final session = DockSessionService();
+    final mins = now.hour * 60 + now.minute;
+
+    final target = today
+        .where((a) =>
+            a.criteria == Criteria.phoneAway &&
+            mins < a.endMinutes &&
+            mins >= a.startMinutes - 15)
+        .firstOrNull;
+    if (target == null && session.phase == DockPhase.idle) return const [];
+
+    final sessionLive = session.phase == DockPhase.active ||
+        session.phase == DockPhase.positioning;
+    final commitment = session.commitment ?? target;
+    if (commitment == null) return const [];
+
+    final started = mins >= commitment.startMinutes;
+    return [
+      Card(
+        color: AppTheme.lightOrange.withValues(alpha: 0.12),
+        child: ListTile(
+          leading: Icon(
+            sessionLive ? Icons.task_alt : Icons.smartphone,
+            color: AppTheme.lightOrange,
+          ),
+          title: Text(
+            sessionLive
+                ? (session.docked
+                    ? 'Phone-free block — phone docked'
+                    : 'Dock session running')
+                : (started
+                    ? 'Phone-free block underway — dock your phone'
+                    : 'Almost time to dock your phone'),
+            style: const TextStyle(color: AppTheme.textWhite, fontSize: 14),
+          ),
+          subtitle: Text(
+            '${_fmtTime(commitment.startTime)}–${_fmtTime(commitment.endTime)}',
+            style: const TextStyle(color: AppTheme.textGrey, fontSize: 12),
+          ),
+          trailing: const Icon(Icons.chevron_right, color: AppTheme.textGrey),
+          onTap: () => Navigator.of(context).push(MaterialPageRoute(
+              builder: (_) => DockSessionScreen(commitment: commitment))),
+        ),
+      ),
+      const SizedBox(height: 16),
+    ];
   }
 
   // ── Active banner ──────────────────────────────────────────────────────────
