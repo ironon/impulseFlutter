@@ -56,8 +56,26 @@ class _DevicesScreenState extends State<DevicesScreen> {
 
   // ── Scanning ──────────────────────────────────────────────────────────────
 
-  void _startScan() {
+  Future<void> _startScan() async {
     setState(() { _isScanning = true; _statusMsg = null; });
+
+    // First, pick up devices the OS is already connected to. On iOS these
+    // never appear in scan results (CoreBluetooth hides connected
+    // peripherals from scans), so without this step an already-connected
+    // watch is invisible to the app.
+    try {
+      final systemDevices = await _btService.discoverSystemDevices();
+      if (systemDevices.isNotEmpty && mounted) {
+        setState(() {
+          _statusMsg =
+              'Found ${systemDevices.length} already-connected device'
+              '${systemDevices.length == 1 ? '' : 's'}';
+        });
+      }
+    } catch (_) {
+      // Non-fatal — continue with a normal scan.
+    }
+    if (mounted) setState(() {});
 
     _btService.startScan().listen(
       (results) {

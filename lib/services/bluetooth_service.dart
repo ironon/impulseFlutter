@@ -85,11 +85,83 @@ class BluetoothService {
     }
   }
 
+  // ── System-connected devices ─────────────────────────────────────────────
+
+  /// Finds devices that the OS is *already* connected to.
+  ///
+  /// This is critical on iOS: CoreBluetooth never reports a peripheral in
+  /// scan results while the phone holds a connection to it (paired in
+  /// Settings, held by another app, or a stale connection from a previous
+  /// session). Without this, an already-connected watch is invisible to the
+  /// scan even though apps like LightBlue still list it.
+  ///
+  /// Queries by our known service UUIDs (iOS requires a service filter for
+  /// this API), merges the results into the device history, and returns the
+  /// devices found.
+  Future<List<BluetoothDeviceModel>> discoverSystemDevices() async {
+    final found = <BluetoothDeviceModel>[];
+
+    Future<void> query(
+      String serviceUuid,
+      DeviceType type,
+      String fallbackName,
+    ) async {
+      List<fbp.BluetoothDevice> devices;
+      try {
+        devices = await fbp.FlutterBluePlus.systemDevices(
+          [fbp.Guid(serviceUuid)],
+        );
+      } catch (_) {
+        // API unavailable / adapter off — just skip, scan proceeds normally.
+        return;
+      }
+
+      for (final d in devices) {
+        final remoteId = d.remoteId.toString();
+
+        // Anchors are keyed by their beacon UUID rather than remoteId, so
+        // match on either field to avoid creating a duplicate entry.
+        final existing = _deviceHistory
+            .where((x) => x.id == remoteId || x.bleRemoteId == remoteId)
+            .firstOrNull;
+
+        final model = existing != null
+            ? existing.copyWith(
+                name: d.platformName.isNotEmpty
+                    ? d.platformName
+                    : existing.name,
+                lastSeen: DateTime.now(),
+                bleRemoteId: remoteId,
+              )
+            : BluetoothDeviceModel(
+                id: remoteId,
+                name: d.platformName.isNotEmpty ? d.platformName : fallbackName,
+                isConnected: false,
+                rssi: 0, // RSSI is unknown without an advertisement
+                lastSeen: DateTime.now(),
+                deviceType: type,
+                bleRemoteId: remoteId,
+              );
+
+        await addOrUpdateDevice(model);
+        found.add(model);
+      }
+    }
+
+    await query(BleConstants.watchServiceUuid, DeviceType.watch, 'Impulse Watch');
+    await query(BleConstants.anchorServiceUuid, DeviceType.anchor, 'Anchor');
+    return found;
+  }
+
   // ── Scanning ─────────────────────────────────────────────────────────────
 
   /// Starts a BLE scan and returns scan results as a stream.
   /// Devices advertising [WATCH_SERVICE_UUID] are typed as [DeviceType.watch].
   /// Devices with iBeacon manufacturer data (Apple company ID) may be anchors.
+  ///
+  /// Note: this only yields devices that are actively advertising. Call
+  /// [discoverSystemDevices] as well to pick up devices the OS is already
+  /// connected to, since those are hidden from scan results on iOS.
   Stream<List<fbp.ScanResult>> startScan() async* {
     if (await fbp.FlutterBluePlus.isSupported == false) {
       throw Exception('Bluetooth not supported by this device');
