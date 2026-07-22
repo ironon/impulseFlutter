@@ -51,6 +51,7 @@ class _MainScreenState extends State<MainScreen>
     with WidgetsBindingObserver {
   int _currentIndex = 0;
   StreamSubscription<List<SeenAnchorInfo>>? _seenAnchorsSub;
+  bool _networkWarnActive = false;   // guards the empty-networks dialog (§8.15)
 
   final _btService    = BluetoothService();
   final _watchService = WatchService();
@@ -90,6 +91,38 @@ class _MainScreenState extends State<MainScreen>
     super.dispose();
   }
 
+  /// Empty-networks warning dialog (§8.15). Ignore dismisses for this launch
+  /// only; Fix jumps to Settings' Network section to add one.
+  Future<void> _showNoNetworkWarning() async {
+    if (!mounted) return;
+    final app = context.read<AppState>();
+    final fix = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        title: const Text('No WiFi networks configured'),
+        content: const Text(
+            'Your anchors can’t come online without one, and your watch can’t '
+            'set its clock.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Ignore')),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Fix')),
+        ],
+      ),
+    );
+    // Either choice ends the nagging for this launch; it returns next launch
+    // while the list is still empty.
+    app.dismissEmptyNetworksWarning();
+    _networkWarnActive = false;
+    if (fix == true && mounted) {
+      setState(() => _currentIndex = 3); // Settings → Network section
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     // First run: goal-first onboarding (§8.1). Skippable ("just exploring");
@@ -97,6 +130,16 @@ class _MainScreenState extends State<MainScreen>
     final onboarded =
         context.select<AppState, bool>((s) => s.onboardingDone);
     if (!onboarded) return const OnboardingFlow();
+
+    // Empty-networks startup warning (§8.15): with hardware paired but no saved
+    // network, warn on every launch (Ignore = this launch only; Fix = add one).
+    // Deliberately un-suppressible — an empty list silently breaks all anchors.
+    final warnNoNetworks =
+        context.select<AppState, bool>((s) => s.shouldWarnNoNetworks);
+    if (warnNoNetworks && !_networkWarnActive) {
+      _networkWarnActive = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) => _showNoNetworkWarning());
+    }
 
     final advanced =
         context.select<AppState, bool>((s) => s.advancedMode);

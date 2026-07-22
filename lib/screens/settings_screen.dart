@@ -22,11 +22,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
   final _btService    = BluetoothService();
   final _autoService  = AutomationService();
 
-  // WiFi cred fields
-  final _ssidCtrl = TextEditingController();
-  final _passCtrl = TextEditingController();
-  bool _passVisible = false;
-
   // Watch settings
   bool _disconnectedIsDormant = true;
   bool _awayIsDormant         = true;
@@ -68,26 +63,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   @override
   void dispose() {
-    _ssidCtrl.dispose();
-    _passCtrl.dispose();
     for (final c in _ipCtrls.values) { c.dispose(); }
     super.dispose();
   }
 
   // ── Actions ───────────────────────────────────────────────────────────────
-
-  Future<void> _pushWifi() async {
-    if (!_watchService.isConnected) { _show('Watch not connected'); return; }
-    if (_ssidCtrl.text.trim().isEmpty) { _show('Enter an SSID first'); return; }
-    _busy(true);
-    try {
-      await _watchService.pushWifiCredentials(
-        _ssidCtrl.text.trim(), _passCtrl.text,
-      );
-      _show('WiFi credentials sent ✓');
-    } catch (e) { _show('Error: $e'); }
-    _busy(false);
-  }
 
   Future<void> _pushSettings() async {
     if (!_watchService.isConnected) { _show('Watch not connected'); return; }
@@ -115,19 +95,30 @@ class _SettingsScreenState extends State<SettingsScreen> {
         default:
           _show('Couldn\'t reach the watch — try again');
       }
-    } catch (e) { _show('Error: $e'); }
+      // Sync tracking (§8.16): bump the settings revision and ack if the write
+      // landed (0x01/0x03), else the watch shows stale and re-syncs later.
+      await app.onWatchSettingsEdited(pushedOk: resp == 0x01 || resp == 0x03);
+    } catch (e) {
+      _show('Error: $e');
+      await app.onWatchSettingsEdited(pushedOk: false);
+    }
     _busy(false);
   }
 
   Future<void> _pushAnchorIps() async {
     if (!_watchService.isConnected) { _show('Watch not connected'); return; }
     _busy(true);
+    final app = context.read<AppState>();
     try {
       for (final entry in _ipCtrls.entries) {
         final ip = entry.value.text.trim();
         if (ip.isNotEmpty) await _btService.updateAnchorIp(entry.key, ip);
       }
+      // Sync tracking (§8.16): bump then ack on 0x01.
+      await app.syncStore.bump('watchIpTable');
       final ok = await _watchService.pushAnchorIpTable(_btService.anchors);
+      final id = app.watchDeviceId;
+      if (ok && id != null) await app.syncStore.setAcked(id, 'watchIpTable');
       _show(ok ? 'Anchor IPs sent ✓' : 'Watch returned error');
     } catch (e) { _show('Error: $e'); }
     _busy(false);
@@ -261,31 +252,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
           const SizedBox(height: 24),
 
-          // ── WiFi credentials ───────────────────────────────────────────
-          _section('Push WiFi Credentials to Watch'),
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                children: [
-                  _textField(_ssidCtrl, 'Network SSID', false),
-                  const SizedBox(height: 12),
-                  _textField(
-                    _passCtrl, 'Password', !_passVisible,
-                    suffix: IconButton(
-                      icon: Icon(
-                        _passVisible ? Icons.visibility_off : Icons.visibility,
-                        color: AppTheme.textGrey,
-                      ),
-                      onPressed: () => setState(() => _passVisible = !_passVisible),
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  _fullBtn('Send to Watch', _pushWifi),
-                ],
-              ),
-            ),
-          ),
+          // ── Network (saved WiFi networks, §8.15) ───────────────────────
+          _section('Network'),
+          _buildNetworkCard(context.watch<AppState>()),
 
           const SizedBox(height: 24),
 
@@ -506,6 +475,163 @@ class _SettingsScreenState extends State<SettingsScreen> {
       await app.markAdvancedIntroSeen();
     }
     await app.setMode(AppMode.advanced);
+  }
+
+  // ── Network section (§8.15) ─────────────────────────────────────────────────
+
+  /// Saved-networks list card: rows per network, add/edit/delete, ceiling copy.
+  Widget _buildNetworkCard(AppState app) {
+    final nets = app.savedNetworks.networks;
+    final full = app.savedNetworks.isFull;
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Networks your anchors and watch can join. Keeping this current is '
+              'what lets your watch repair a stranded anchor overnight.',
+              style: TextStyle(color: AppTheme.textGrey, fontSize: 12.5),
+            ),
+            const SizedBox(height: 12),
+            if (nets.isEmpty)
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 8),
+                child: Text('No networks saved yet.',
+                    style: TextStyle(color: AppTheme.textGrey)),
+              )
+            else
+              for (final n in nets)
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(Icons.wifi, color: AppTheme.textGrey),
+                  title: Text(n.ssid,
+                      style: const TextStyle(color: AppTheme.textWhite)),
+                  subtitle: const Text('••••••••',
+                      style: TextStyle(color: AppTheme.textGrey)),
+                  onTap: () => _showNetworkSheet(app, existing: n.ssid),
+                  trailing: IconButton(
+                    icon: const Icon(Icons.delete_outline,
+                        color: AppTheme.textGrey),
+                    onPressed: () => _confirmDeleteNetwork(app, n.ssid),
+                  ),
+                ),
+            const SizedBox(height: 12),
+            if (full)
+              const Text(
+                'Anchors can hold four networks. Remove one to add another.',
+                style: TextStyle(color: AppTheme.textGrey, fontSize: 12),
+              )
+            else
+              _fullBtn('Add network', () => _showNetworkSheet(app)),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _confirmDeleteNetwork(AppState app, String ssid) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('Stop using "$ssid"?'),
+        // Honest wording (§8.15): can't retract creds a device already stored.
+        content: const Text(
+            'This stops your app and watch offering this network. It can’t '
+            'remove credentials already saved on a device.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel')),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Stop using')),
+        ],
+      ),
+    );
+    if (ok == true) {
+      await app.removeNetwork(ssid);
+      _show('Stopped using "$ssid"');
+    }
+  }
+
+  /// Add/edit sheet: SSID + masked password with eye reveal (§8.15). Saving
+  /// re-pushes to the watch and (later, §8.14) re-offers to distressed anchors.
+  Future<void> _showNetworkSheet(AppState app, {String? existing}) async {
+    final current =
+        existing == null ? null : app.savedNetworks.bySsid(existing);
+    final ssidCtrl = TextEditingController(text: current?.ssid ?? '');
+    final passCtrl = TextEditingController(text: current?.password ?? '');
+    bool reveal = false;
+    String? error;
+
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: AppTheme.cardGrey,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSheet) => Padding(
+          padding: EdgeInsets.only(
+            left: 16, right: 16, top: 16,
+            bottom: MediaQuery.of(ctx).viewInsets.bottom + 16,
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(existing == null ? 'Add network' : 'Edit network',
+                  style: const TextStyle(
+                      color: AppTheme.textWhite,
+                      fontSize: 18,
+                      fontWeight: FontWeight.w600)),
+              const SizedBox(height: 16),
+              _textField(ssidCtrl, 'Network name (SSID)', false),
+              const SizedBox(height: 12),
+              _textField(
+                passCtrl, 'Password', !reveal,
+                suffix: IconButton(
+                  icon: Icon(
+                    reveal ? Icons.visibility_off : Icons.visibility,
+                    color: AppTheme.textGrey,
+                  ),
+                  onPressed: () => setSheet(() => reveal = !reveal),
+                ),
+              ),
+              if (error != null) ...[
+                const SizedBox(height: 8),
+                Text(error!, style: const TextStyle(color: Colors.redAccent)),
+              ],
+              const SizedBox(height: 16),
+              _fullBtn(existing == null ? 'Save' : 'Update', () async {
+                final ssid = ssidCtrl.text.trim();
+                if (ssid.isEmpty) {
+                  setSheet(() => error = 'Enter a network name');
+                  return;
+                }
+                bool ok;
+                if (existing == null) {
+                  ok = await app.addOrUpdateNetwork(ssid, passCtrl.text);
+                } else {
+                  ok = await app.renameNetwork(existing, ssid, passCtrl.text);
+                }
+                if (!ok) {
+                  setSheet(() => error =
+                      'Couldn’t save — the list is full or that name is taken.');
+                  return;
+                }
+                if (ctx.mounted) Navigator.pop(ctx);
+                _show(app.watch.isConnected
+                    ? 'Saved and pushed to your watch'
+                    : 'Saved — will reach your watch when it’s in range');
+              }),
+            ],
+          ),
+        ),
+      ),
+    );
+    ssidCtrl.dispose();
+    passCtrl.dispose();
   }
 
   Widget _section(String title) => Padding(

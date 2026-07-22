@@ -20,7 +20,17 @@ class EditOutcome {
 class PassSpendResult {
   final bool success;
   final int remaining;
-  const PassSpendResult({required this.success, required this.remaining});
+
+  /// True when the spend was accepted locally but the watch was unreachable, so
+  /// it's **held pending** and will apply the moment the watch is back in range
+  /// (§8.10). Enforcement may continue until then — surface this honestly.
+  final bool pending;
+
+  const PassSpendResult({
+    required this.success,
+    required this.remaining,
+    this.pending = false,
+  });
 }
 
 /// Ties the self-binding policy (§8.9) and emergency passes (§8.10) to concrete

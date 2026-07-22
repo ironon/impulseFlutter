@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 
 import '../models/bluetooth_device_model.dart';
 import '../services/anchor_service.dart';
 import '../services/bluetooth_service.dart';
+import '../state/app_state.dart';
 import '../theme/app_theme.dart';
 
 class DeviceSettingsModal extends StatefulWidget {
@@ -19,10 +21,99 @@ class _DeviceSettingsModalState extends State<DeviceSettingsModal> {
   bool _isBusy = false;
   String? _statusMsg;
 
+  // Anchor WiFi state (§8.2/§8.14): read …000E when the card opens.
+  AnchorWifiStatus? _wifiStatus;
+  bool _wifiChecking = false;
+
   @override
   void initState() {
     super.initState();
     _nameController = TextEditingController(text: widget.device.name);
+    if (widget.device.deviceType == DeviceType.anchor &&
+        widget.device.bleRemoteId != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _checkAnchorWifi());
+    }
+  }
+
+  /// Read the anchor's real WiFi state (and let §8.14 offer if warranted). The
+  /// user is standing at the anchor, so check immediately (§8.14 trigger 3).
+  Future<void> _checkAnchorWifi() async {
+    if (!mounted) return;
+    setState(() => _wifiChecking = true);
+    final status =
+        await context.read<AppState>().checkAndOfferAnchor(widget.device);
+    if (!mounted) return;
+    setState(() {
+      _wifiChecking = false;
+      _wifiStatus = status;
+    });
+  }
+
+  /// Human wording for the anchor WiFi state (§8.2) — from the anchor, not
+  /// inferred from HTTP timeouts.
+  String _wifiStateLabel(AnchorWifiStatus s) {
+    switch (s.state) {
+      case AnchorWifiState.connected:
+        return 'On "${s.ssid}"';
+      case AnchorWifiState.connecting:
+        return 'Connecting…';
+      case AnchorWifiState.authFailed:
+        return 'Wrong password for "${s.ssid}"';
+      case AnchorWifiState.apNotFound:
+        return 'Can’t find "${s.ssid}"';
+      case AnchorWifiState.neverProvisioned:
+        return 'WiFi not set up';
+      case AnchorWifiState.unknown:
+        return 'Unknown';
+    }
+  }
+
+  /// "Re-send WiFi" (§8.2): pick a saved network to offer this anchor. When the
+  /// anchor is in distress and its SSID isn't saved, this is the prompt-for-
+  /// password entry point (we route the user to add it).
+  Future<void> _reSendWifi() async {
+    final app = context.read<AppState>();
+    final nets = app.savedNetworks.networks;
+    if (nets.isEmpty) {
+      setState(() => _statusMsg =
+          'No saved networks yet — add one in Settings ▸ Network first.');
+      return;
+    }
+    final chosen = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: AppTheme.cardGrey,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Padding(
+              padding: EdgeInsets.all(16),
+              child: Text('Offer a network to this anchor',
+                  style: TextStyle(
+                      color: AppTheme.textWhite, fontWeight: FontWeight.w600)),
+            ),
+            for (final n in nets)
+              ListTile(
+                leading: const Icon(Icons.wifi, color: AppTheme.textGrey),
+                title: Text(n.ssid,
+                    style: const TextStyle(color: AppTheme.textWhite)),
+                onTap: () => Navigator.pop(ctx, n.ssid),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (chosen == null || !mounted) return;
+    setState(() { _isBusy = true; _statusMsg = null; });
+    final res = await app.offerSavedNetworkToAnchor(widget.device, chosen);
+    if (!mounted) return;
+    setState(() {
+      _isBusy = false;
+      _wifiStatus = res?.statusAfter ?? _wifiStatus;
+      _statusMsg = res == null
+          ? 'Couldn’t reach the anchor over Bluetooth.'
+          : 'Offered "$chosen" — the anchor will try it.';
+    });
   }
 
   @override
@@ -132,6 +223,71 @@ class _DeviceSettingsModalState extends State<DeviceSettingsModal> {
               ),
             ],
           ),
+
+          // WiFi section (anchors only, §8.2/§8.14) — real state from …000E.
+          if (isAnchor && widget.device.bleRemoteId != null) ...[
+            const SizedBox(height: 28),
+            const Text(
+              'WiFi',
+              style: TextStyle(
+                color: AppTheme.textGrey,
+                fontSize: 13,
+                fontWeight: FontWeight.w600,
+                letterSpacing: 1.0,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                if (_wifiChecking)
+                  const SizedBox(
+                      width: 14, height: 14,
+                      child: CircularProgressIndicator(
+                          strokeWidth: 2, color: AppTheme.textGrey))
+                else
+                  Icon(
+                    _wifiStatus?.state == AnchorWifiState.connected
+                        ? Icons.wifi
+                        : Icons.wifi_off,
+                    size: 18,
+                    color: (_wifiStatus?.state.isDistress ?? false)
+                        ? const Color(0xFFE0A100)
+                        : AppTheme.textGrey,
+                  ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    _wifiChecking
+                        ? 'Checking anchor WiFi…'
+                        : _wifiStatus == null
+                            ? 'Couldn’t read WiFi state over Bluetooth.'
+                            : _wifiStateLabel(_wifiStatus!),
+                    style: const TextStyle(
+                        color: AppTheme.textWhite, fontSize: 14),
+                  ),
+                ),
+              ],
+            ),
+            // slots_used is Advanced-mode only (§8.2).
+            if (_wifiStatus != null &&
+                context.watch<AppState>().advancedMode)
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Text('Credential slots used: ${_wifiStatus!.slotsUsed}',
+                    style: const TextStyle(
+                        color: AppTheme.textGrey, fontSize: 12)),
+              ),
+            const SizedBox(height: 12),
+            OutlinedButton.icon(
+              onPressed: _isBusy ? null : _reSendWifi,
+              icon: const Icon(Icons.wifi_find, size: 18),
+              style: OutlinedButton.styleFrom(
+                foregroundColor: AppTheme.lightOrange,
+                side: const BorderSide(color: AppTheme.lightOrange),
+              ),
+              label: const Text('Re-send WiFi'),
+            ),
+          ],
 
           // Servo Control section (anchors only)
           if (isAnchor) ...[

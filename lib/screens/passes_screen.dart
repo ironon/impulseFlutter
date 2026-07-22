@@ -25,6 +25,10 @@ class _PassesScreenState extends State<PassesScreen> {
   DateTime? _regenAt;
   List<AuditEntryRow> _audit = const [];
 
+  /// Spends held pending because the watch was unreachable (§8.10) — shown
+  /// distinctly from completed spends.
+  List<EmergencyPassSpendRow> _pending = const [];
+
   /// True when the numbers come from the watch's own ledger (…001B) — the
   /// authoritative source once that firmware is present.
   bool _fromWatch = false;
@@ -52,12 +56,14 @@ class _PassesScreenState extends State<PassesScreen> {
       regen = await app.integrity.nextPassRegeneratesAt(DateTime.now());
     }
     final audit = await app.integrity.auditEntries(limit: 50);
+    final pending = await app.integrity.pendingPassSpends();
     if (!mounted) return;
     setState(() {
       _fromWatch = watchLedger != null;
       _remaining = remaining;
       _regenAt = regen;
       _audit = audit;
+      _pending = pending;
     });
   }
 
@@ -147,10 +153,21 @@ class _PassesScreenState extends State<PassesScreen> {
     if (confirmed != true || chosen == null || !mounted) return;
     final result = await app.spendPass(chosen!, day);
     if (!mounted) return;
+    final String msg;
+    if (!result.success) {
+      msg = 'No passes left this week.';
+    } else if (result.pending) {
+      // §8.10: honest — the spend applies once the watch is back in range.
+      msg = 'Can’t reach your watch. The pass will apply the moment it’s back '
+          'in range — enforcement may continue until then.';
+    } else {
+      msg = 'Pass spent — that day is yours. ${result.remaining} left this week.';
+    }
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-      content: Text(result.success
-          ? 'Pass spent — that day is yours. ${result.remaining} left this week.'
-          : 'No passes left this week.'),
+      content: Text(msg),
+      duration: result.pending
+          ? const Duration(seconds: 6)
+          : const Duration(seconds: 4),
     ));
     await _refresh();
   }
@@ -391,6 +408,29 @@ class _PassesScreenState extends State<PassesScreen> {
               ),
             ),
             const SizedBox(height: 24),
+
+            // ── Pending spends (§8.10) — held until the watch is reachable ──
+            if (_pending.isNotEmpty) ...[
+              const Text('Waiting to reach your watch',
+                  style: TextStyle(
+                      color: Color(0xFFE0A100),
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold)),
+              const SizedBox(height: 8),
+              for (final p in _pending)
+                ListTile(
+                  dense: true,
+                  leading: const Icon(Icons.hourglass_bottom,
+                      color: Color(0xFFE0A100), size: 18),
+                  title: Text('Pass for ${p.forDate} — applies when connected',
+                      style: const TextStyle(
+                          color: AppTheme.textWhite, fontSize: 13)),
+                  subtitle: const Text(
+                      'Enforcement may continue until your watch is back in range.',
+                      style: TextStyle(color: AppTheme.textGrey, fontSize: 11)),
+                ),
+              const SizedBox(height: 24),
+            ],
 
             // ── Audit trail ──
             const Text('History',

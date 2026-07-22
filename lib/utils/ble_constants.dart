@@ -1,10 +1,17 @@
 /// BLE UUID constants — must match firmware exactly.
 class BleConstants {
+  /// Max saved WiFi networks the app keeps (§8.15). **Must equal the firmware
+  /// `ANCHOR_WIFI_MAX_CRED_SLOTS`** (§4.4) — a longer app list than the anchor's
+  /// slot table makes offers silently evict each other. Reference this constant;
+  /// never hardcode a second literal (§0.3 cross-cutting note).
+  static const int anchorWifiMaxCredSlots = 4;
+
   // ── Anchor ────────────────────────────────────────────────────────────────
   static const String anchorServiceUuid        = '4a0f0001-f8ce-11ee-8001-020304050607';
   static const String anchorIdentifyCharUuid   = '4a0f0002-f8ce-11ee-8001-020304050607';
   static const String anchorWifiCredCharUuid   = '4a0f0003-f8ce-11ee-8001-020304050607';
   static const String anchorSettingsCharUuid   = '4a0f0004-f8ce-11ee-8001-020304050607';
+  static const String anchorWifiStatusCharUuid = '4a0f000e-f8ce-11ee-8001-020304050607'; // §6.2 …000E (v0.8)
   static const String anchorSchedCtrlCharUuid  = '4a0f0005-f8ce-11ee-8001-020304050607';
   static const String anchorSchedDataCharUuid  = '4a0f0006-f8ce-11ee-8001-020304050607';
   static const String anchorToggleCharUuid     = '4a0f0007-f8ce-11ee-8001-020304050607';

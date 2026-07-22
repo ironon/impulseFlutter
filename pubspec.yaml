@@ -41,6 +41,10 @@ dependencies:
   # Local storage for device history
   shared_preferences: ^2.3.4
 
+  # Secure storage for saved WiFi passwords (§8.15 — credential material that
+  # must not sit in plaintext shared_preferences).
+  flutter_secure_storage: ^9.2.2
+
   # Permission handling
   permission_handler: ^11.3.1
   provider: ^6.1.5+1

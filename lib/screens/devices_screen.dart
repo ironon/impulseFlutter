@@ -5,6 +5,7 @@ import 'package:flutter_blue_plus/flutter_blue_plus.dart' as fbp;
 import 'package:provider/provider.dart';
 
 import '../models/bluetooth_device_model.dart';
+import '../models/device_sync_state.dart';
 import '../services/anchor_service.dart';
 import '../services/bluetooth_service.dart';
 import '../services/watch_service.dart';
@@ -374,6 +375,9 @@ class _DevicesScreenState extends State<DevicesScreen> {
               ],
             ),
 
+            // Sync/stale marker (§8.16) — separate from the liveness dot above.
+            _syncMarker(watch),
+
             // Watch status panel (when connected)
             if (connected && status != null) ...[
               const Divider(height: 24, color: AppTheme.cardGrey),
@@ -407,7 +411,10 @@ class _DevicesScreenState extends State<DevicesScreen> {
   Widget _anchorCard(BluetoothDeviceModel anchor) {
     return Card(
       margin: const EdgeInsets.only(bottom: 8),
-      child: ListTile(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          ListTile(
         contentPadding: const EdgeInsets.all(12),
         leading: Container(
           width: 48, height: 48,
@@ -476,7 +483,74 @@ class _DevicesScreenState extends State<DevicesScreen> {
             ),
           ],
         ),
+          ),
+          // Sync/stale marker (§8.16), padded to match the tile.
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+            child: _syncMarker(anchor),
+          ),
+        ],
       ),
+    );
+  }
+
+  /// Sync/stale marker (§8.16) — distinct from the liveness dot (§8.7) and from
+  /// pending changes (§8.9). Spinner while an attempt is in flight; a yellow bar
+  /// with an icon, a text reason, and "Sync now" once it settles stale; nothing
+  /// when synced. Never colour-only (icon + text back the hue for accessibility).
+  Widget _syncMarker(BluetoothDeviceModel device) {
+    return Consumer<AppState>(
+      builder: (context, app, _) {
+        final sync = app.deviceSyncState(device);
+        if (sync.status == SyncStatus.synced) return const SizedBox.shrink();
+        final isWatch = device.deviceType == DeviceType.watch;
+        if (sync.isSyncing) {
+          return Padding(
+            padding: const EdgeInsets.only(top: 10),
+            child: Row(children: const [
+              SizedBox(
+                  width: 14, height: 14,
+                  child: CircularProgressIndicator(
+                      strokeWidth: 2, color: AppTheme.textGrey)),
+              SizedBox(width: 8),
+              Text('Syncing…',
+                  style: TextStyle(color: AppTheme.textGrey, fontSize: 13)),
+            ]),
+          );
+        }
+        // Settled stale → yellow, informational (never red).
+        const yellow = Color(0xFFE0A100);
+        return Container(
+          margin: const EdgeInsets.only(top: 10),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          decoration: BoxDecoration(
+            color: yellow.withValues(alpha: 0.12),
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: yellow.withValues(alpha: 0.5)),
+          ),
+          child: Row(
+            children: [
+              const Icon(Icons.sync_problem, color: yellow, size: 18),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  sync.reason(isWatch: isWatch),
+                  style: const TextStyle(color: yellow, fontSize: 12.5),
+                ),
+              ),
+              TextButton(
+                onPressed: () => app.syncNow(device),
+                style: TextButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(horizontal: 8),
+                  minimumSize: const Size(0, 32),
+                ),
+                child: const Text('Sync now',
+                    style: TextStyle(color: yellow, fontSize: 12.5)),
+              ),
+            ],
+          ),
+        );
+      },
     );
   }
 

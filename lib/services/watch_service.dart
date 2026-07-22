@@ -41,6 +41,12 @@ class WatchStatus {
   /// Null when the firmware predates the byte (short payload).
   final bool? conditionMet;
 
+  /// `schedule_crc` (firmware v0.8, lockstep): CRC32 of the schedule blob the
+  /// watch currently holds, or null on a truncated/pre-v0.8 payload. The app
+  /// cross-checks this against `ScheduleEncoder`'s CRC to *confirm* sync rather
+  /// than infer it (§8.16). 0 ⇒ the watch holds no schedule.
+  final int? scheduleCrc;
+
   /// Queued unreachable beep-anchor notifications (§8.7).
   final List<UnreachableAnchor> unreachableAnchors;
 
@@ -52,6 +58,7 @@ class WatchStatus {
     required this.batteryPct,
     this.activeEventId,
     this.conditionMet,
+    this.scheduleCrc,
     this.unreachableAnchors = const [],
   });
 
@@ -68,8 +75,11 @@ class WatchStatus {
   bool get isAlarming => activeEventId != null && conditionMet == false;
 
   static WatchStatus fromBytes(List<int> bytes) {
-    // Layout: activity u8, bt u8, wifi u8, worn u8, battery u8,
-    //         active_event_id 16, [condition_met u8], [unreachable_count u8, ...]
+    // Layout (v0.8): activity u8, bt u8, wifi u8, worn u8, battery u8,
+    //   active_event_id 16, condition_met u8, schedule_crc u32,
+    //   unreachable_count u8, [entries...]. Every device is flashed in the v0.8
+    //   lockstep batch, so the app assumes this layout and never version-detects
+    //   by length (§10 item 8 — the variable-length tail makes that ambiguous).
     if (bytes.length < 21) {
       return const WatchStatus(
         activityState: 0,
@@ -94,6 +104,16 @@ class WatchStatus {
     if (pos < bytes.length) {
       conditionMet = bytes[pos] != 0;
       pos += 1;
+    }
+
+    // schedule_crc u32 LE (v0.8). Present in the lockstep layout right after
+    // condition_met and before the unreachable section.
+    int? scheduleCrc;
+    if (pos + 4 <= bytes.length) {
+      scheduleCrc = ByteData.sublistView(
+              Uint8List.fromList(bytes.sublist(pos, pos + 4)))
+          .getUint32(0, Endian.little);
+      pos += 4;
     }
 
     final unreachable = <UnreachableAnchor>[];
@@ -132,6 +152,7 @@ class WatchStatus {
       batteryPct: batt,
       activeEventId: eventId,
       conditionMet: conditionMet,
+      scheduleCrc: scheduleCrc,
       unreachableAnchors: unreachable,
     );
   }

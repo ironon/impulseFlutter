@@ -96,6 +96,35 @@ void main() {
     expect(negate.recurrenceType, RecurrenceType.once);
   });
 
+  test('spend held pending when the watch is unreachable (§8.10)', () async {
+    final a = evt('e4');
+    await app.saveCommitment(updated: a);
+    // No watch connected in the test → the spend can't be confirmed.
+    final res = await app.spendPass(a, DateTime.now());
+    expect(res.success, isTrue);
+    expect(res.pending, isTrue); // ack-before-decrement: not committed, held
+
+    final pending = await app.integrity.pendingPassSpends();
+    expect(pending.length, 1);
+    expect(pending.single.eventUuid, 'e4');
+    // The negate still rides in the push so it applies the moment it lands.
+    final push = await app.scheduleForPush();
+    expect(push.where((x) => x.negate && x.id == 'e4').length, 1);
+  });
+
+  test('retrying an unconfirmed spend does not double-charge (§8.10)', () async {
+    final a = evt('e5');
+    await app.saveCommitment(updated: a);
+    final yyyymmdd = DateTime.now().year * 10000 +
+        DateTime.now().month * 100 +
+        DateTime.now().day;
+    await app.spendPass(a, DateTime.now());
+    await app.spendPass(a, DateTime.now()); // retry the same day
+    final pending = await app.integrity.pendingPassSpends();
+    // Still a single pending row for that commitment+day — reused, not doubled.
+    expect(pending.where((p) => p.forDate == yyyymmdd).length, 1);
+  });
+
   test('drafts persist and remove', () async {
     await app.addDraft(TemplateDraft(
       id: 'd1',

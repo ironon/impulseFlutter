@@ -134,6 +134,25 @@ class NotificationService {
     } catch (_) {}
   }
 
+  /// Anchor distress notice (§8.14): an anchor can't get on its network and we
+  /// can't fix it from saved credentials. State the consequence, stay calm
+  /// (impulse_overview voice). Tapping is handled by the app's Devices surface.
+  Future<void> notifyAnchorDistress(String anchorName, String ssid) async {
+    if (!_ready) return;
+    try {
+      await _plugin.show(
+        id: ('distress:$anchorName').hashCode & 0x7FFFFFFF,
+        title: '$anchorName can’t get online',
+        body: ssid.isEmpty
+            ? '$anchorName isn’t connected to WiFi. Until it’s back online it '
+                'won’t sound.'
+            : '$anchorName can’t get on "$ssid". Until it’s back online it '
+                'won’t sound. Tap to add the password.',
+        notificationDetails: _details,
+      );
+    } catch (_) {}
+  }
+
   String _fmtMinutes(int minutes) {
     final h24 = minutes ~/ 60;
     final m = (minutes % 60).toString().padLeft(2, '0');

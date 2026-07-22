@@ -161,6 +161,38 @@ class IntegrityStore {
         .write(const EmergencyPassSpendsCompanion(pushed: Value(true)));
   }
 
+  /// Spends whose one-day negate has NOT yet been confirmed by the watch
+  /// (`pushed == false`) — the pending-spend retry queue (§8.10). Held when the
+  /// watch was unreachable at spend time; completed on reconnect.
+  Future<List<EmergencyPassSpendRow>> pendingPassSpends() {
+    return (_db.select(_db.emergencyPassSpends)
+          ..where((t) => t.pushed.equals(false))
+          ..orderBy([(t) => OrderingTerm(expression: t.spentAt)]))
+        .get();
+  }
+
+  /// An existing *pending* spend for this exact commitment+day, or null. Used to
+  /// avoid double-charging when the user retries a spend the watch hasn't yet
+  /// confirmed (§8.10).
+  Future<EmergencyPassSpendRow?> pendingSpendFor(
+      String eventUuid, int forDateYyyymmdd) {
+    return (_db.select(_db.emergencyPassSpends)
+          ..where((t) =>
+              t.eventUuid.equals(eventUuid) &
+              t.forDate.equals(forDateYyyymmdd) &
+              t.pushed.equals(false))
+          ..limit(1))
+        .getSingleOrNull();
+  }
+
+  /// Drop a spend row entirely — used when the watch reports its own ledger is
+  /// exhausted (`…001B` `0x02`), so a locally-held pending spend is voided
+  /// rather than left to retry forever (§8.10).
+  Future<void> deletePassSpend(int id) {
+    return (_db.delete(_db.emergencyPassSpends)..where((t) => t.id.equals(id)))
+        .go();
+  }
+
   Future<List<EmergencyPassSpendRow>> passHistory() {
     return (_db.select(_db.emergencyPassSpends)
           ..orderBy([
