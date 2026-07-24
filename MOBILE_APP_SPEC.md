@@ -15,7 +15,7 @@ This spec changes rapidly. Rules for maintaining this section:
 
 ### 0.1 Spec ↔ app parity
 
-Code home: `impulse_app/lib`. **Last audited: 2026-07-11** (branch `app-spec-v1.2`; re-audit as work lands).
+Code home: `impulse_app/lib`. **Last audited: 2026-07-11** (branch `app-spec-v1.2`; re-audit as work lands). **Partial re-audit 2026-07-21** covering anchor WiFi provisioning only — see the last three rows.
 
 | Spec area | Status | Notes |
 |---|---|---|
@@ -34,10 +34,30 @@ Code home: `impulse_app/lib`. **Last audited: 2026-07-11** (branch `app-spec-v1.
 | Debug menu + release gating (§2A.4, §8.13) | ✅ | Advanced-only tabbed debug menu: decoded Watch Status + characteristic probes, live Prox Score / Dock Status meters (short anchor telemetry sessions), raw BLE log; write tools (manual characteristic write, force re-push, time write, fingerprint-upload stub) compile-time gated behind `BuildConfig.debugWriteToolsEnabled` (dev builds only). Audited 2026-07-11. |
 | Anchor HTTP schedule push + mDNS IP discovery (§7.3/§8.4) | ✅ | AnchorDistributionService: POST blob+CRC to every known anchor IP on schedule change (fire-and-forget), staleness (~12h) re-push on app foreground, `<uuid>.local` mDNS refresh (new IP ⇒ full push + watch IP-table update). No midnight push by design. Time also re-pushed on foreground (§8.11). Audited 2026-07-12. |
 | Integrity stores (drift) + reactive state (§2) | ✅ | `drift` pending-queue/pass-ledger/audit-trail (`IntegrityStore`, tested) + Provider `AppState`. |
+| Anchor WiFi credential write (§6.2 `…0003`) | ❌ | **Regression vs. the parity claims above.** `anchorWifiCredCharUuid` is declared in `ble_constants.dart` but unused anywhere in `lib/`; `AnchorService` has only `identify()`/`sendToggle()`. The §8.1/§8.2 rows claiming anchor "WiFi setup" are **overstated**. Audited 2026-07-21. |
+| Anchor WiFi re-provisioning + WiFi Status (§8.14, `…000E`) | ❌ | **New in v1.3.** Check-then-offer sweep, 4-slot non-destructive offers, distress notification, BLE IP fallback. Lockstep with firmware v0.8 §4.4/§4.5.1. |
+| Network settings / saved networks (§8.15) | ❌ | **New in v1.3.** Settings currently has a non-persisting "Push WiFi Credentials to Watch" form (`settings_screen.dart:265`); replace with the Network section (max 4, secure-storage passwords, empty-state startup warning). Prerequisite for §8.14. Audited 2026-07-21. |
+| Sync state / "stale" marker (§8.16) | ❌ | **New in v1.3.** Per-payload revision vs. per-device acked revision; auto-sync-on-change (push if connected, else scan+connect+push, else yellow); reactive convergence; kept distinct from liveness (§8.7) and pending changes (§8.9). Audited 2026-07-21. |
 
 Legend: ✅ implemented · 🟡 partial · ⚠️ diverges from spec · ❌ not started
 
 ### 0.2 Change log
+
+**v1.3 — 2026-07-21** (**lockstep with firmware v0.8** — anchor GATT)
+- **New §8.14 "Anchor WiFi re-provisioning."** Closes the hole where an anchor that loses WiFi has no recovery path. A stranded anchor is *silently inert* — no WiFi ⇒ no SNTP ⇒ no valid time ⇒ fail-open with no beeps (firmware §4.7) — so a Sunrise Lock whose nightstand anchor is stranded simply never fires. Design is **check-then-offer**: a cheap BLE read of the new WiFi Status characteristic decides whether a write is warranted, never a blind periodic overwrite.
+- **§6.2: new anchor characteristic WiFi Status `…000E`** (Read + Notify) with `state`/`ssid`/`ipv4`/`rssi`/`slots_used`. Previously the app had *no* way to ask an anchor about its network state. Also serves as a BLE fallback for learning anchor IPs when mDNS is blocked.
+- **§6.2: anchor WiFi Credentials `…0003` semantics changed (lockstep).** The anchor now holds **4** credential slots (dedup by SSID, LRU eviction) and the write responds `0x01` = *accepted*, immediately, with the outcome delivered via a `…000E` notify. **`0x01` no longer means "connected"** — subscribe before writing.
+- **Offers to healthy anchors are now allowed**, purely because 4 slots + most-recently-successful-first ordering make them non-destructive. On older single-slot firmware they are not safe; probe `…000E` and fall back (§10 item 6).
+- **Distress notification added.** An anchor in auth-failed / AP-not-found state that we can't fix from saved credentials prompts the user for the password, rate-limited per distress episode. Justified because the failure is invisible and costs the user their alarm.
+- **The watch now repairs anchors too** (firmware §5.5.3): battery-gated (>4000 mV, i.e. on the charger), ~20 min interval, **schedule-referenced anchors only**. Repairs are **silent** — no Watch Status change — so the app must re-read `…000E` rather than trust cached state, and must keep the watch's saved-network list current since the watch can only offer what it holds.
+- **§4.4:** anchor record gains `lastWifiState`/`lastWifiSsid`/`lastWifiCheckAt`/`slotsUsed`/`offeredSsids[]`; app-level saved-networks list made explicit.
+- **§3 item 11 / §0.1: honest correction** — anchor WiFi credential writing was never implemented (`anchorWifiCredCharUuid` has zero usages in `lib/`), so prior ✅ rows claiming anchor "WiFi setup" were overstated.
+- **Documented platform constraint:** the app cannot read OS-saved WiFi passwords, so offers only ever carry credentials the user typed into the app. Rotated router passwords can be *detected* but not silently healed — copy must not imply otherwise.
+- **New §8.15 "Network settings."** Settings' **"Push WiFi Credentials to Watch"** form is **removed** and replaced by a **Network** section owning a persistent saved-networks list (**max 4**, matching `ANCHOR_WIFI_MAX_CRED_SLOTS`): rows per network, tap for detail with masked password + eye reveal, add/edit/delete. The old form persisted nothing — it typed credentials straight at the watch and forgot them — which is precisely why §8.14 had no credential source. Editing a saved password is now the user-facing fix path for the rotated-router-password case.
+- **Empty-list startup warning (§8.15):** with no networks saved, warn on **every** launch with **Ignore** (this launch only) / **Fix** (opens add-network). Deliberately un-suppressible, because an empty list means anchors never reach SNTP and therefore never beep at all (firmware §4.7).
+- **§2: `flutter_secure_storage` added** for saved WiFi passwords — credential material shouldn't sit in plaintext `shared_preferences`.
+- **New §8.16 "Sync state & the stale marker."** Per-payload **revision counters** vs. per-device **acknowledged** revisions; staleness is *derived*, never a stored flag, and is pessimistic (unconfirmed = stale, self-heals on reinstall). **Auto-sync on any authoring change:** push if the watch is connected, else scan → connect → push, else mark the device **yellow** in Devices; anchors go yellow when an HTTP push isn't `200`-acked. Convergence is reactive — a device coming into range clears its own yellow. Explicitly reconciled with §8.9 (a withheld loosening is *not* stale) and kept visually distinct from liveness (§8.7).
+- **Schedule sync is now confirmed, not just inferred (lockstep, firmware v0.8).** Watch Status `…0016` gains a `schedule_crc u32`; anchors answer `GET /schedule` and mirror the CRC in WiFi Status `…000E`. The app cross-checks against `ScheduleEncoder`'s CRC to catch a device that reverted to a stale persisted schedule after a reset — the failure pure inference can't see.
 
 **v1.2 — 2026-07-10**
 - **Sunrise Lock unblocked:** firmware spec v0.6 §5.4.4 adds the window-start worn check and per-event **`donningGraceS`**; §8.8's parameter set is now final. Event model + blob gain `donningGraceS` (§4.1, §7.2 — same lockstep batch); §10 item 3 and §14 updated.
@@ -55,6 +75,24 @@ Legend: ✅ implemented · 🟡 partial · ⚠️ diverges from spec · ❌ not 
 - Readiness pass (same day): settle window bounded **30–240 min** (§8.9 item 4); criteria/target changes corrected to classify as **loosening** everywhere (§8.9 item 2, matching firmware §9.1); **UUID-stability rule** added (§8.9 item 3 — edits preserve event UUIDs or the diff gate misreads them); Settings payloads extended + Emergency Pass SET_ALLOWANCE added to §6.1/§6.2 (lockstep); iOS Local Network permission added (§9); §14 Sunrise Lock item upgraded from "verify" to a confirmed firmware gap with specifics.
 
 **v1.0** — the spec as first committed; pre-changelog.
+
+### 0.3 v1.3 implementation handoff (build order & notes)
+
+The v1.3 / firmware-v0.8 batch is large and tightly coupled. **Do not attempt it all at once** — build in this order, where each step depends on the previous. Firmware and app steps interleave; the firmware-only ordering is mirrored in `firmware_spec_v2.md` §10.2.
+
+1. **Firmware: anchor WiFi refactor + WiFi Status `…000E` (firmware §4.4, §4.5.1, §6.2).** Event-driven WiFi (distinguishes auth-fail `0x03` / no-AP `0x04`), 4-slot non-destructive credential store, non-blocking write response, WiFi Status characteristic incl. `schedule_crc`, `GET /schedule` CRC readback, and the `schedule_crc` byte in Watch Status. **Everything else waits on this.** Flash watch + anchor + app status-parsers together (lockstep).
+2. **App: implement the missing anchor WiFi write (§3 gap 11).** `AnchorService.sendWifiCredentials()` against `…0003`, plus reading `…000E`. This is currently *unimplemented* despite prior ✅ marks — it's the true starting point on the app side.
+3. **App: Network settings §8.15.** Persistent saved-networks list (max 4, `flutter_secure_storage` passwords, empty-state startup warning gated on having hardware). This is the credential *source* everything downstream draws from — nothing to offer without it.
+4. **App: schedule/config sync state §8.16.** Revision-vs-acked tracking, CRC cross-check for the schedule class, auto-sync-on-change (push / scan+push / yellow), reactive convergence. Reuses the existing `AnchorDistributionService` staleness machinery.
+5. **App: anchor re-provisioning §8.14.** Check-then-offer built on steps 2–4 (needs the read path, saved networks, and sync/reachability signals).
+6. **Firmware: watch-side anchor repair (firmware §5.5.3).** Independent of the app steps; needs only `…000E` (step 1) and the battery ADC. Can proceed in parallel after step 1.
+7. **App: emergency-pass out-of-range fix §8.10.** Small but a behavior change to a locked decision — do it deliberately, with the ack-before-decrement + pending-spend UX.
+
+**Cross-cutting notes for the implementer:**
+- **Probe, don't assume, for the integrity characteristics.** `…001A`/`…001B` (§6.1) are already runtime-probed; keep that pattern. The v0.8 additions (`…000E`, `schedule_crc`, `GET /schedule`) ship in one flash, so within this batch the app may assume they're present — but still fail *gracefully* (treat a missing readback as "infer from acks," not a crash).
+- **Two numbers must stay equal:** the app's saved-networks cap (§8.15) and firmware `ANCHOR_WIFI_MAX_CRED_SLOTS` (§4.4) are both 4. Reference the constant; don't hardcode a second literal that can drift.
+- **Three independent indicators** — liveness (§8.7), sync/stale (§8.16), pending-loosening (§8.9) — must remain visually and logically distinct. The most common implementation mistake here will be collapsing "device behind" and "change deliberately withheld" into one state; §8.16 spells out why they differ.
+- **The app is never the sole writer.** The watch heals anchors (firmware §5.5.3) and holds the authoritative pass/pending ledgers (§8.9/§8.10). Always re-read device state rather than trusting the app's last-known value.
 
 ---
 
@@ -75,7 +113,7 @@ Impulse is a **habit-enforcement / self-binding** system for adults with ADHD (a
 ## 2. Tech stack & architecture
 
 - **Flutter** (keep it Flutter). Current deps: `flutter_blue_plus` (BLE), `shared_preferences` (local storage), `permission_handler`. Keep these; add as needed (see below).
-- Required addition: **`drift`** for the integrity-critical stores — the pending-changes queue, emergency-pass ledger, and audit trail must be transactional, timestamped, and migration-safe (they are the app's trust machinery); `shared_preferences` remains fine for simple prefs and device records. Further additions: `flutter_local_notifications` (pre-session dock reminders, §8.6); `http` (anchor schedule push, §8.4); `multicast_dns` or platform mDNS for anchor IP discovery (§8.4); `network_info_plus` (LAN/SSID awareness). Justify any heavy addition beyond these.
+- Required addition: **`drift`** for the integrity-critical stores — the pending-changes queue, emergency-pass ledger, and audit trail must be transactional, timestamped, and migration-safe (they are the app's trust machinery); `shared_preferences` remains fine for simple prefs and device records. Further additions: `flutter_local_notifications` (pre-session dock reminders, §8.6); `http` (anchor schedule push, §8.4); `multicast_dns` or platform mDNS for anchor IP discovery (§8.4); `network_info_plus` (LAN/SSID awareness); **`flutter_secure_storage`** for saved WiFi passwords (§8.15 — credential material that should not sit in plaintext `shared_preferences`). Justify any heavy addition beyond these.
 - **Current file layout** (keep the shape, extend it):
   - `models/` — `automation_model.dart` (the Event/Commitment model), `bluetooth_device_model.dart`.
   - `services/` — `bluetooth_service.dart`, `watch_service.dart`, `anchor_service.dart`, `automation_service.dart`, `debug_log_service.dart`.
@@ -153,6 +191,7 @@ Fold/upgrade the existing `debug_screen` into an Advanced-only debug menu: raw *
 8. No **emergency pass** system (§8.10).
 9. No **Sunrise Lock** first-class experience (§8.8).
 10. Anchor GATT UUIDs for proximity/fingerprint/dock are absent from `ble_constants.dart`.
+11. **Anchor WiFi credentials are never written at all.** `anchorWifiCredCharUuid` is declared in `ble_constants.dart` but has **zero usages** anywhere in `lib/` — `AnchorService` exposes only `identify()` and `sendToggle()`. The watch's equivalent is wired up (`watch_service.dart`), the anchor's is not, so §8.1 step 4 / §8.2 "set WiFi + settings" is unimplemented despite the parity table marking those rows ✅. Implement `AnchorService.sendWifiCredentials()` plus the WiFi Status read, then build §8.14 on top.
 
 ---
 
@@ -180,6 +219,10 @@ enum Criteria { getAway, stayNear, getOffWifi, getOnWifi, phoneAway }  // indice
 
 ### 4.4 Anchor record (app-side)
 Per anchor: `uuid`, human `name`, `bleRemoteId`/MAC (for directed connects), last-known `ipAddress` (for WiFi schedule push + the watch's anchor-IP table), online/last-seen, role tags the user assigns (e.g., "phone dock," "desk," "nightstand"), and per-anchor settings (`max_beep_minutes`). Persist locally.
+
+**WiFi provisioning state (§8.14):** `lastWifiState` (the `…000E` `state` byte), `lastWifiSsid`, `lastWifiCheckAt`, `slotsUsed`, and `offeredSsids[]` — the SSIDs this app has already offered to this anchor, with the timestamp and observed outcome of each. `offeredSsids` is what prevents re-offering the same failing credentials on every sweep.
+
+**Saved networks (app-level, not per-anchor):** a list of `{ssid, password}` pairs the user has entered in the app, **capped at 4** to match `ANCHOR_WIFI_MAX_CRED_SLOTS`. This is the *only* source of credentials an offer can draw from — see the platform constraint in §8.14. Managed in the Settings **Network** section (§8.15), and consumed by the watch credential push (`…0011`), anchor provisioning (`…0003`), and the watch's autonomous repair (firmware §5.5.3).
 
 ### 4.5 Watch record & live status
 Paired watch: `uuid`, `bleRemoteId`, saved WiFi creds list, timezone offset, the two dormancy settings, and **live status** (activity state, bt/wifi, worn, battery %, active event id, queued unreachable-anchor notifications) parsed from the Watch Status characteristic (§6).
@@ -212,7 +255,7 @@ All UUIDs are `4A0F00XX-F8CE-11EE-8001-020304050607`. **Update `ble_constants.da
 | Schedule Data | `…0013` | Write No-Resp | schedule blob chunks (§7.1). |
 | Settings | `…0014` | Write w/Resp | `[disconnected_is_dormant u8][away_is_dormant u8][tz_offset_minutes int16][settle_window_min u16 (clamped 30–240)]`. Resp `0x01`; `0x03` = loosening fields quarantined (firmware §9.8); `0x02` = tz change rejected during active window (§9.7). **Payload grew 4→6 bytes in firmware v0.5 — lockstep.** |
 | Seen Anchors | `…0015` | Read + Notify | `[count u8]` then per: `[uuid 16][rssi+128 u8][last_seen u32]`. Notifies on new discovery. |
-| Watch Status | `…0016` | Read + Notify | `[activity u8 (0 dormant,1 enforcement,2 dormant_sleep)][bt u8][wifi u8][worn u8][battery_pct u8 (0xFF=n/a)][active_event_id 16][condition_met u8 (0 = actively alarming; 1 otherwise — added firmware v0.6, lockstep)]` then `[unreachable_count u8]` and per entry `[uuid 16][name_len u8][name UTF-8][ts u32]`. Notifies on change. |
+| Watch Status | `…0016` | Read + Notify | `[activity u8 (0 dormant,1 enforcement,2 dormant_sleep)][bt u8][wifi u8][worn u8][battery_pct u8 (0xFF=n/a)][active_event_id 16][condition_met u8 (0 = actively alarming; 1 otherwise — added firmware v0.6, lockstep)][schedule_crc u32 (CRC32 of the last-accepted schedule blob, 0 if none — added firmware v0.8, lockstep; §8.16 sync verification)]` then `[unreachable_count u8]` and per entry `[uuid 16][name_len u8][name UTF-8][ts u32]`. Notifies on change. |
 | Anchor IP Table | `…0017` | Write w/Resp | `[count u8]` then per: `[uuid 16][ipv4 u32 network-order][ts u32]`. |
 | LED Config | `…0018` | (present in firmware) | Format TBD — inspect firmware; expose only if used. |
 | Time | `…0019` | Write w/Resp | `[utc_epoch int64][tz_offset_minutes int16]`. Sets the watch clock + timezone (firmware `firmware_spec_v2.md` §5.6). Resp `0x01`; resp `0x02` = rejected because the write would end the currently active window (firmware §9.7) — surface honestly, don't retry-loop. See §8.11. |
@@ -227,7 +270,8 @@ Anchors advertise as **iBeacon** with Major `0x4A0F` (the Impulse namespace filt
 | Char | UUID | Props | Payload / behavior |
 |------|------|-------|--------------------|
 | Identify | `…0002` | Write No-Resp | any write → anchor beeps ~800ms (find-which-anchor). |
-| WiFi Credentials | `…0003` | Write w/Resp | JSON `{"ssid","password"}`. Resp `0x01` connected / `0x00` failed. |
+| WiFi Credentials | `…0003` | Write w/Resp | JSON `{"ssid","password"}`. **Changed in firmware v0.8 (lockstep):** the anchor stores up to **4** credential pairs (dedup by SSID, LRU eviction) and the write **no longer blocks on the connection attempt** — resp `0x01` = *accepted and will be attempted*, `0x00` = malformed. The connection **outcome** arrives via a WiFi Status notify, so **subscribe to `…000E` before writing**. Never treat `0x01` as "connected." |
+| **WiFi Status** | `…000E` | Read + Notify | **NEW (firmware v0.8 §4.4).** `[state u8][ssid_len u8][ssid UTF-8][ipv4 u32 network-order][rssi+128 u8][slots_used u8]`. `state`: 0 never provisioned · 1 connecting/retrying · 2 connected · 3 auth failed · 4 AP not found. States **3 and 4 (and 0) are "distress."** Notifies on state transition and on IP change. Also the BLE-side fallback for learning an anchor's IP when mDNS fails (§8.14). |
 | Settings | `…0004` | Write w/Resp | `[max_beep_minutes u16][tz_offset_minutes int16]`. Resp `0x01`. tz is required for the anchor's local schedule recalculation (firmware §4.7). **Payload grew 2→4 bytes in firmware v0.5 — lockstep.** |
 | Schedule Ctrl | `…0005` | Write w/Resp | 3-phase transfer (same protocol as watch, §7.1). |
 | Schedule Data | `…0006` | Write No-Resp | schedule blob chunks. |
@@ -278,8 +322,11 @@ Onboarding's success metric is **time-to-first-armed-commitment**. The flow is b
 - **Skippable & re-enterable:** a "just exploring" skip path exists; "add another goal" from Home reopens the same onboarder gallery (same registry entries, same quick-forms). Onboarding is the permanent friendly entry into the registry, not a one-shot wizard.
 
 ### 8.2 Device management (`devices_screen`)
-- **Watch:** connection state, live status (§8.7), battery, worn, saved WiFi list (add/remove), timezone, the two dormancy settings, "sync time" action.
+- **Watch:** connection state, live status (§8.7), battery, worn, saved WiFi list (add/remove), timezone, the two dormancy settings, "sync time" action, and the **sync-state marker** (§8.16 — yellow when the watch is behind the app's authoring copy, with a "Sync now" retry).
 - **Anchors:** per-anchor card with online state (BLE seen + LAN reachable), name/role, Identify button, WiFi setup, `max_beep_minutes`, servo lock/unlock (respect the `0x02` "rejected during active event" response and explain it), IP (auto-discovered), and a "forget" action.
+  - **WiFi state comes from the anchor, not from inference.** Read `…000E` (§8.14) when the card opens and render the real `state` — "on *\<ssid\>*", "can't find *\<ssid\>*", "wrong password for *\<ssid\>*", "never set up" — instead of guessing from HTTP timeouts. Show `slots_used` in Advanced mode only.
+  - **"Re-send WiFi" action:** offers a saved network to this anchor (§8.14). Safe to expose unconditionally now that anchor credentials are slot-based and non-destructive; when the anchor is in distress and we hold no matching password, this is the prompt-for-password entry point.
+  - **Sync-state marker (§8.16):** yellow when the app knows this anchor is behind on schedule/settings/creds, with a "Sync now" retry. Distinct from the online/offline liveness dot and from any pending-loosening state.
 - Keep the existing `anchor_service.sendToggle` and `AnchorToggleResult` handling; surface the rejected case in UI.
 
 ### 8.3 Commitment builder (`automations_screen`, `add_automation_modal`, `automation_block`)
@@ -360,6 +407,7 @@ A **rolling budget of emergency passes** that skip **one commitment for one day*
 - **Scope: global** across all commitments (for now).
 - **Authoritative home:** the ledger ultimately lives **on the watch** (firmware §9.6, Emergency Pass characteristic `…001B`), so clearing app data can't replenish passes, and a pass spend bypasses the firmware diff gate by design (it's the sanctioned escape valve — a plain `negate` push would otherwise be quarantined as a loosening). Until that firmware phase ships, the app ledger is the interim implementation; once it ships, seed the watch ledger from app state on first connect and thereafter spend via the characteristic, keeping the app-side audit trail for display.
 - Implement a pass as a one-off `negate` for the chosen commitment on the chosen day (interim: app-enforced push; final: `…001B` spend), decrementing the rolling budget, with an **audit trail** (when spent, which commitment). Show remaining passes and when the next one regenerates. Spending a pass on an *active* window must take effect immediately (interim: re-push the schedule) so enforcement actually stops.
+- **The spend is only real once the watch confirms it (important — surfaced by §8.16).** A spend, whether via `…001B` or the interim re-push, is a **BLE write that fails silently when the watch is out of range.** If the app optimistically decrements the budget and the write never lands, the user loses a pass *and keeps getting alarmed* — the exact opposite of the escape valve's purpose. So: **do not commit the decrement until the watch acknowledges** (the `…001B` `0x01` response, or the interim schedule END ack). If the watch is unreachable at spend time, hold the spend as **pending**, tell the user honestly — *"Can't reach your watch. The pass will apply the moment it's back in range — enforcement may continue until then"* — and complete it automatically when the watch reconnects (same opportunistic path as §8.16). The watch card shows stale/yellow meanwhile. A pending spend must be visibly distinct from a completed one in the audit trail, and must not be double-charged if the user retries. (When the watch is in range, this is invisible — the spend commits in the same round trip.)
 
 ### 8.11 Time sync (dedicated firmware characteristic)
 The watch needs correct wall-clock time (schedule windows, phoneAway grace, logging) and today only gets it via NTP (needs WiFi). The app sets the watch clock over BLE via the dedicated **Time characteristic** `…0019` on the watch service, **specified in `firmware_spec_v2.md` §5.6**: write `[utc_epoch int64][tz_offset_minutes int16]`. (The characteristic is spec'd but may not be present in every firmware build yet — probe for it before writing; see §10.)
@@ -371,6 +419,130 @@ The watch needs correct wall-clock time (schedule windows, phoneAway grace, logg
 
 ### 8.13 Debug tools (`debug_screen`, `debug_log_service`)
 This is the **Advanced-mode debug menu** described in §2A.4 — it exists only in Advanced mode. Keep and expand the current tools: raw BLE log, manual characteristic read/write, live **Prox Score** meter, live **Dock Status**, decoded **Watch Status** dump/raw packets, force schedule re-push, and the fingerprint-upload stub (§8.5). This is the "raw packets from the watch and any other relevant information" surface. Per §2A.4, the **write-capable tools** here (manual write, force re-push, fingerprint upload, time writes) exist **only in dev/debug builds**; release builds ship the read-only telemetry surface.
+
+### 8.14 Anchor WiFi re-provisioning ("credential offers")
+
+**The problem.** An anchor stores its WiFi credentials once, at setup. If it never got them, if NVS was cleared, or if the network changed, it falls off the LAN with no recovery path — and a stranded anchor is *silently inert*, not merely degraded: no WiFi means no SNTP, and with no valid time the anchor acts as though it has no schedule and will not beep at all (firmware §4.7). A Sunrise Lock whose nightstand anchor is stranded simply doesn't go off. BLE is always available as the repair channel, because anchors advertise continuously and stay connectable regardless of WiFi state (firmware §4.3).
+
+**Platform constraint — read this before designing the UX.** Neither iOS nor Android will give the app the saved password for the network the phone is currently on. An offer can therefore only ever contain credentials **the user typed into the app** (the saved-networks list, §4.4). This mechanism can self-heal:
+- an anchor that never successfully received credentials (setup failed, user walked away),
+- an anchor whose NVS was cleared or was factory-reset,
+- a network the user has since added in the app (moved house, new router, second AP),
+- a multi-AP home where an anchor is stuck on the wrong band.
+
+It **cannot** silently fix the most common real case — the user rotated the router password and never told the app. That case can only be *detected* and *prompted*. Do not write copy that implies automatic recovery in general; be specific.
+
+**Check first, offer second.** The periodic action is a cheap BLE **read**, never a blind write. Connect, subscribe to `…000E`, read WiFi Status, then decide:
+
+| Anchor `state` | Condition | Action |
+|---|---|---|
+| `2` connected | phone's current SSID is already in `offeredSsids` or matches the anchor's | nothing |
+| `2` connected | a saved network the anchor doesn't hold | **offer** — additive resilience; the anchor banks it in a spare slot and will not drop its working link to try it (firmware §4.4) |
+| `0` never provisioned | a saved network exists | **offer** |
+| `3` auth failed / `4` AP not found | anchor's stored SSID matches a saved network **whose password we've not already offered** | **offer** |
+| `3` / `4` | no saved password for the anchor's SSID, or we already offered it and it still failed | **prompt the user** (below) |
+| `1` connecting | any | wait; re-check next sweep |
+| BLE unreachable too | — | existing "check it's powered" state (§8.7) |
+
+Offering to a *connected* anchor is safe only because of the firmware's 4 slots and most-recently-successful-first ordering — an offer can never orphan a working anchor. If that firmware behavior ever changes, this row must change with it.
+
+**Triggers.** Don't invent a new timer — reuse `AnchorDistributionService`'s existing foreground staleness sweep (§7.3, ~12 h), which already walks every known anchor. Run the BLE WiFi-Status check when:
+1. that sweep's HTTP push or mDNS resolve for an anchor **fails**, or
+2. an anchor is visible in a BLE scan but has had no successful LAN contact in ~12 h, or
+3. the user opens that anchor's card in Devices (check immediately — they're standing there), or
+4. a new anchor IP is learned and the push still fails.
+
+Failure-driven, with 12 h as the outer bound. One staleness concept for the user to understand, shared with the schedule push.
+
+**Learning the IP over BLE.** When `state == 2`, record `ipv4` from the read into the anchor's `ipAddress`. This is a genuine fallback for the HTTP push when mDNS is unavailable — common on guest/enterprise networks. It does **not** rescue a denied iOS Local Network permission (the HTTP push itself still needs it); in that case keep the honest "can't reach anchors over WiFi" state from §9.
+
+**The prompt path (distress we can't fix ourselves).** When an anchor is in state `3`/`4` and we have no working password for it, surface a **notification** — not just a passive card state:
+> "*\<anchor name\>* can't get on *\<ssid\>*. Until it's back online it won't sound." → tapping opens the anchor's WiFi setup with the SSID pre-filled, asking only for the password.
+
+This crosses the notification threshold because the failure is invisible and consequential: the user's Sunrise Lock will quietly not fire. Rate-limit to once per anchor per distress episode (reset when the anchor's `state` changes) so a permanently-dead anchor doesn't nag daily. Use the existing `NotificationService` (§8.6/§8.11). Keep the voice calm and factual per `impulse_overview.md` — state the consequence, don't alarm.
+
+**The watch also repairs anchors (firmware §5.5.3).** A watch on the charger (battery > 4000 mV, dormant, not connected to the app) checks every ~20 min for schedule-referenced anchors in distress and offers its own stored credentials. This is the Sunrise Lock safety net — the watch is on the nightstand all night beside the exact anchors that commitment depends on. Implications for the app:
+- **The app is not the only writer.** An anchor may recover without the app doing anything; always re-read `…000E` rather than trusting cached state. Offers are idempotent by SSID on the anchor side, so the two healers cannot conflict.
+- **Repairs are silent** — the watch does not report them (deliberate, to keep Watch Status stable). The app discovers recovery on its next check.
+- **Keep the watch's credential list current.** The watch can only offer what it holds, so pushing a newly saved network to the watch (`…0011`) is now also a *repair-capability* update, not just a watch-connectivity one. Push saved networks to the watch whenever the list changes.
+
+**Security note.** The anchor GATT is unauthenticated, so any nearby device can write credentials to an anchor. This is pre-existing and acceptable — the anchor is not the root of trust (the watch is, §8.9) and anchor loss degrades beeping but not enforcement (fail-open by design). The corresponding *outbound* risk — leaking the user's WiFi password to a device merely advertising the Impulse iBeacon Major — is why the watch restricts its offers to schedule-referenced anchors (firmware §5.5.3). The app has a stronger filter: it only ever offers to anchors the user has explicitly paired and named.
+
+### 8.15 Network settings (the saved-networks store)
+
+**Replaces the "Push WiFi Credentials to Watch" section in Settings** (`settings_screen.dart`, currently a fire-and-forget SSID/password form calling `pushWifiCredentials` — it persists nothing). That form is the reason §8.14 has no credentials to draw on: the app has never remembered a network the user typed. The replacement is a **"Network"** section that owns the saved-networks list defined in §4.4.
+
+**This list is now infrastructure, not a form.** It is the single source of credentials for three separate consumers:
+1. the watch's credential list (`…0011`), pushed whenever the list changes,
+2. anchor provisioning and re-provisioning offers (`…0003`, §8.14),
+3. the watch's autonomous anchor repair (firmware §5.5.3) — the watch can only offer what it holds, so a network missing here is a repair the watch cannot perform.
+
+Because of (3), keeping this list current is a *reliability* action, not a convenience. Say so in the section's supporting copy.
+
+**Section contents:**
+- **A list of saved networks**, each row showing the SSID and a compact status hint (e.g. "on this network now" when it matches the phone's current SSID via `network_info_plus`).
+- **Tapping a row** opens the network detail: SSID, and the password rendered as `••••••••` with an **eye toggle** to reveal it. Editing either field is allowed; saving re-pushes to the watch and re-offers to any anchor in distress (§8.14) — this is the fix path for a rotated router password, which §8.14 can detect but not heal on its own.
+- **A "Add network" button**, which opens the same add/edit sheet.
+- **A delete affordance** per network. Deleting must be honest: it stops the app and watch offering that network, but it **cannot retract credentials already stored on a device**. Word it as "stop using this network," not "remove from devices."
+
+**Limit: 4 networks.** This is not arbitrary — it matches `ANCHOR_WIFI_MAX_CRED_SLOTS` (firmware §7). An app list longer than the anchor's slot table would mean offers silently evicting each other on the anchor, producing an anchor that flaps between credential sets and an app that believes all of them are installed. Keep the two numbers equal; if the firmware constant changes, change this with it. At 4 networks, disable "Add network" and explain the ceiling ("anchors can hold four networks") rather than hiding the button.
+
+**Empty-state startup warning.** When the saved-networks list is **empty**, warn on **every app startup**:
+> "No WiFi networks configured. Your anchors can't come online without one, and your watch can't set its clock."
+>
+> **[Ignore]** **[Fix]**
+
+- **Fix** opens the same add-network sheet as the button above.
+- **Ignore** dismisses **for this launch only** — the warning returns next startup. This is deliberate: the empty state is not a preference, it's a broken install in which anchors never reach SNTP and therefore never beep at all (firmware §4.7). The nagging ends the moment one network exists, which is a single 20-second action, so there is no need for a permanent opt-out.
+- Only the *empty* list triggers this. A populated-but-failing state is handled by the per-anchor distress notification in §8.14, which is more specific and more actionable.
+- **Gate on having hardware.** Suppress the warning entirely until at least one device (watch or anchor) is paired. A "just exploring" user (§8.1 skip path) with no hardware has nothing that needs a network, and nagging them is noise. The warning is about a *broken* install, not an *empty* one.
+- **Migration caveat.** The old form persisted nothing, so on first launch after this change the list is empty even for users whose watch/anchors already hold credentials. The warning may therefore fire once for an install that is actually fine; re-adding the network (a 20-second action) both silences it and gives §8.14/§5.5.3 something to work with. Acceptable — the app is the authoring source of truth and this reconciles it.
+
+**Storage.** These are real WiFi passwords held in plaintext at rest if they go in `shared_preferences`. Prefer **`flutter_secure_storage`** (Keychain / Android Keystore) for the password field, keeping SSIDs and metadata in the existing prefs store. This is a justified dependency addition under §2: it is credential material, and the alternative is passwords readable from an unencrypted app-data backup. The reveal toggle needs no biometric gate — the threat model here is device theft, which secure storage addresses, not the self-binding adversary of §8.9 (WiFi credentials grant no commitment escape).
+
+**Ordering.** Present in the order added; the app offers all saved networks and lets the anchor's own slot ordering (firmware §4.5.1, most-recently-successful first) decide what it actually uses. Don't build user-facing reordering — it would imply a priority the devices don't honor.
+
+### 8.16 Sync state & the "stale" marker
+
+The app is the authoring copy; the devices hold the enforced copy. Whenever the app *knows* its copy is ahead of what a device holds, it must say so plainly — a yellow "stale" marker on that device — and it must try to close the gap automatically. This is the visible half of a guarantee that's otherwise invisible until a commitment silently misbehaves.
+
+**Model: derive staleness, never store a flag.** Do not set a "stale" boolean anywhere — flags rot (set-and-forget bugs, missed reset paths). Instead:
+- Each **pushable payload class** carries a monotonic **revision counter**, bumped on every authoring edit that changes it. The classes and their target devices:
+
+  | Payload class | Targets | Push transport |
+  |---|---|---|
+  | Schedule | watch + all anchors | watch BLE 3-phase (§7.1); anchors HTTP (§7.3), BLE fallback |
+  | Watch settings (dormancy, tz, settle window) | watch | BLE `…0014` |
+  | Watch saved-networks list | watch | BLE `…0011` |
+  | Watch anchor-IP table | watch | BLE `…0017` |
+  | Anchor settings (max_beep, tz) | per anchor | BLE `…0004` |
+  | Anchor WiFi creds | per anchor | BLE `…0003` (§8.14) |
+
+- Each **device record** stores, per payload class, the **last revision it acknowledged**. "Acknowledged" is strict: the write-with-response `0x01` (settings/creds/IP table), the schedule END `0x01`/`0x03` (§7.1), or an HTTP `200` (anchor schedule). A *sent* update that wasn't acked does **not** advance the acked revision — optimistic tracking would show green over a dropped write, which is the one thing this feature exists to prevent.
+- **Confirm, don't just infer, for the schedule (firmware v0.8).** The watch reports the CRC32 of its last-accepted schedule in Watch Status (`…0016`), and each anchor answers `GET /schedule` — and mirrors the same CRC in WiFi Status (`…000E`) — with the blob it currently holds. Compare it against `ScheduleEncoder`'s CRC of the effective schedule: **match → confirmed synced** (clears yellow even if the app never saw the ack, e.g. after a reinstall); **mismatch → stale**, even if the app *believed* it had pushed. This catches a device that silently reverted to a stale persisted schedule after a reset/re-flash — the one failure inference alone can't see. Revision-vs-acked (above) remains the mechanism for the classes with no readback (settings, creds, IP table); the schedule additionally gets this authoritative cross-check.
+- **Stale = `currentRevision > device.ackedRevision`** for any class that device owns. A device is shown stale if *any* of its classes is behind. Persist acked revisions with the device records (`shared_preferences` is fine — this is device state, not integrity trust machinery); persist current revisions with the authoring copy. On reinstall, acked revisions are absent → everything reads stale → the app re-pushes and converges. Pessimistic by construction.
+
+**Time is not a payload class.** The watch clock (`…0019`) advances continuously and is pushed on its own triggers (§8.11); never fold it into staleness or the watch would read stale forever.
+
+**Critical interaction with the self-binding delay (§8.9).** Staleness compares the device against the schedule it *should currently be running*, **not** the raw authoring copy. A pending **loosening** that hasn't promoted yet is *supposed* to be absent from the device — the device correctly runs the old rule. That is **not** stale; it is the pending-changes state (§8.9), shown by that UI, not by a yellow marker. Only the **effective** schedule (current rule + already-promoted changes + immediate tightenings) feeds the schedule revision counter. Concretely: an immediate tightening that hasn't reached the watch → stale/yellow; a queued loosening waiting out its 24 h → not stale. Getting this wrong makes the two systems fight — the stale marker would nag the user to "sync" a change the system is deliberately withholding.
+
+**Auto-sync on change (the behavior you asked for).** Any authoring edit (Settings, Network, a commitment, anchor config) bumps the relevant revision(s), then immediately kicks a **sync attempt** for each affected device:
+1. **Watch:** if BLE-connected, push the affected payload(s) now. If not connected, start a **bounded background scan** for the watch service `…0010` (the watch advertises on a ~6 s heartbeat even while dormant, firmware §8, so it's usually findable within seconds). On finding it: connect, push, and let the connection follow normal lifecycle. If the scan times out or the push fails → leave the acked revision where it was, so the watch renders **stale/yellow** in Devices.
+2. **Anchors:** HTTP-push to every known anchor IP (existing §8.4 fire-and-forget). Each `200` advances that anchor's acked schedule revision; anchors that don't `200` stay **stale/yellow**. For config classes that only travel over BLE (anchor settings, WiFi creds), attempt a directed BLE connect when the anchor is BLE-visible but LAN-unreachable — the same visible-over-BLE-but-stranded fallback as §8.14.
+3. **Debounce.** Coalesce a burst of rapid edits into one sync attempt (e.g. 1–2 s trailing debounce) so tapping through several settings doesn't fire several scans.
+4. **Foreground operation.** The scan/connect/push is a **foreground** action — the user just edited something, so the app is open. Don't attempt background BLE scanning for sync (iOS forbids it and it drains battery); if the app is backgrounded before an attempt completes, leave the device stale and retry on next foreground (this is exactly the opportunistic-convergence path below).
+
+**Opportunistic convergence.** Staleness is reactive state in `AppState`, recomputed when (a) an edit bumps a revision, (b) a device acks a push, or (c) a device's **connection state changes**. A stale device coming into range must auto-trigger its pending sync — a watch that reconnects, or an anchor whose IP is freshly learned/reachable, clears its own yellow without user action. This reuses the §7.3/§8.4 staleness-push machinery; sync state is that mechanism made *visible and per-payload* rather than schedule-only. **Self-binding promotion rides the same path:** when a queued loosening promotes (§8.9 item 5), it changes the *effective* schedule → bumps the schedule revision → triggers a sync attempt exactly like any other edit. No separate promotion-push path is needed.
+
+**Transient vs. settled — don't cry wolf.** While a scan or push is **in flight**, show a **spinner / "syncing…"**, not yellow. Yellow appears only after an attempt has **failed or timed out** (device behind and not currently reachable). Distinguish the two subtitles honestly:
+- *"Syncing…"* — attempt in progress.
+- *"Waiting to reach your watch"* / *"Anchor offline — will sync when reachable"* — settled stale, will retry opportunistically.
+
+Yellow is **informational, not an error** — a watch out of range and behind is a normal, calm state, consistent with the product voice (`impulse_overview.md`). Never red; red is for enforcement-critical failures, not sync lag.
+
+**Devices screen presentation (§8.2).** A stale device card gets a **yellow background/edge** plus a one-line reason. **Never color-only** (§9 accessibility): pair the yellow with an icon and the text reason, so the state survives colorblindness and greyscale. Same rule for the green/neutral synced state — don't rely on hue alone to signal "all good." Tapping expands *what* is behind (schedule, settings, networks) and offers a **"Sync now"** retry that reruns the sync attempt (including a fresh scan). When everything is acked, the card returns to its normal (green/neutral) state with no marker. Aggregate honestly: "3 changes waiting" is fine; don't enumerate every revision.
+
+**Scope note.** Sync state covers *configuration the app pushes*. It is distinct from **liveness** (§8.7, is the device online right now) and from **pending changes** (§8.9, deliberately-withheld loosenings). A device can be online, fully synced, and still have pending loosenings — three independent indicators. Keep them visually distinct so the user can tell "you need do nothing," "waiting to reach a device," and "a change is holding until Thursday" apart.
 
 ---
 
@@ -394,7 +566,10 @@ The app can't fully deliver these without matching firmware work — flag each; 
 2. **Watch LED config (`…0018`)** — payload format undocumented here; inspect firmware before exposing.
 3. **Sunrise Lock mechanics — spec'd, implementation pending:** the window-start worn check + per-event `donningGraceS` (`firmware_spec_v2.md` §5.4.4, v0.6) ship in the lockstep batch; the template builder can be built now against the final parameter set (§8.8).
 4. **Optional "collect fingerprint now" trigger** — if guided calibration needs an explicit anchor-side collect command rather than relying on organic watch queries (§8.5). Only add if the organic path proves insufficient.
-5. Confirm **anchor connection budget** (NimBLE max connections) supports phone (persistent) + watch (transient) + app concurrently during phoneAway sessions (§8.6).
+5. Confirm **anchor connection budget** (NimBLE max connections) supports phone (persistent) + watch (transient) + app concurrently during phoneAway sessions (§8.6). **Now also load-bearing for §8.14:** the app's periodic WiFi-Status checks and the watch's repair connects (firmware §5.5.3) both consume anchor connection slots. Keep both lean — connect, read, act, disconnect.
+6. **Anchor WiFi slots + WiFi Status characteristic (firmware v0.8 §4.4/§4.5.1) — lockstep.** §8.14 depends on `…000E` and on the credential write becoming non-blocking/multi-slot. **Probe for `…000E` at runtime**; against older anchor firmware, fall back to the current behavior (treat `0x01` on the credential write as "connected," infer health from HTTP reachability only) and don't offer to anchors that appear healthy — the single-slot overwrite risk is real on those builds.
+7. **Watch-side anchor repair (firmware §5.5.3)** — no app wire change, but the app must keep the watch's saved-network list current for it to work (§8.14). Nothing to probe; the app simply cannot observe repairs directly by design.
+8. **Device-reported schedule CRC for §8.16 (firmware v0.8 — now in the lockstep batch).** The watch reports its last-accepted schedule CRC32 in Watch Status (`…0016`); each anchor answers `GET http://<ip>/schedule` with its stored blob's CRC and mirrors it in WiFi Status (`…000E`). The app compares against `ScheduleEncoder`'s CRC to **confirm** sync rather than infer it, catching a device that reverted to a stale persisted schedule after a reset. Prefer the CRC cross-check for the schedule class; revision-vs-acked remains the fallback for classes with no readback. **All devices are flashed in the v0.8 lockstep batch** (backward compatibility is explicitly out of scope), so the app may assume the v0.8 Watch Status layout — do **not** try to version-detect by Watch Status length, which is ambiguous because the trailing unreachable-notification section is variable-length.
 
 ---
 
@@ -406,7 +581,7 @@ The app can't fully deliver these without matching firmware work — flag each; 
 - **Devices** — watch card + anchor cards (setup, identify, WiFi, settings, servo, roles).
 - **Phone-dock session** — pre-session dock screen + in-session monitor (§8.6).
 - **Sunrise Lock** — dedicated setup (§8.8).
-- **Settings** — account/app prefs, emergency-pass allowance, self-binding delay policy, timezone, permissions.
+- **Settings** — account/app prefs, **Network** (saved-networks list, §8.15 — replaces "Push WiFi Credentials to Watch"), emergency-pass allowance, self-binding delay policy, timezone, permissions.
 - **Debug** — advanced tools (§8.13).
 
 ---
@@ -427,6 +602,9 @@ These are settled and already reflected in the cited sections; this is a fast in
 - **App modes (§2A):** Normal (default) = friendly templates from a **template registry** (seeded with hardcoded defaults: Sunrise Lock, Study Time, Gym Time, Phone-Free; forward-designed for community template libraries); Advanced = raw blocks + debug menu. Editing a template block in Advanced **detaches** it to manual; manual blocks show as **"Custom"** cards in Normal. Sunrise Lock expands to `getAway(bedroom anchor)` + beep on the nightstand anchor. Debug-menu **write tools are compile-time dev-only** (§2A.4); release builds get read-only telemetry.
 - **Onboarding (§8.1):** goal-first flow — pair watch → pick a goal → place only that goal's anchors → 2–3-question quick-form → armed. Built on **onboarder-designated registry templates** (§2A.2) with required-anchor-role metadata; unanswerable inputs become visible **drafts** with a follow-up nudge; skippable and re-enterable ("add another goal" = the same gallery). v1 onboarders: Sunrise Lock, Phone-Free evening, Gym Time, Study Time.
 - **Root of trust (firmware §9):** the watch authoritatively enforces the self-binding asymmetry — diff gate, pending queue with autonomous promotion, on-watch pass ledger. The app's §8.9/§8.10 logic is interim enforcement + permanent preview mirror of the **same canonical classification** (firmware §9.1); handle push responses `0x03`/`0x04` and render pending state from `…001A`. Schedule blob gains a leading **format version byte** (`0x02`); the same lockstep batch extends the watch Settings payload (+`settle_window_min u16`), the anchor Settings payload (+`tz_offset int16`), the schedule blob (+`donning_grace_s u16` per event), the Watch Status payload (+`condition_met u8`), and adds the Emergency Pass SET_ALLOWANCE opcode. Edits must **preserve event UUIDs** (§8.9 item 3).
+- **Anchor WiFi re-provisioning (§8.14):** **check-then-offer**, never blind periodic writes. Anchors hold **4** credential slots so offers are non-destructive; the app therefore *may* offer to healthy anchors for resilience, while the **watch** offers only to anchors **in distress** and only to those **referenced by its own schedule** (a security boundary — any device can advertise Major `0x4A0F`). Watch repair is gated on **battery > 4000 mV** (on the charger) at a **~20 min** interval and is **silent** (no Watch Status change). Trigger the app's checks off the existing ~12 h staleness sweep and on LAN-push failure. Anchors we can't fix from saved credentials **notify** the user. The app can never read OS-saved WiFi passwords — rotated passwords are detectable, not auto-healable.
+- **Network settings (§8.15):** Settings' "Push WiFi Credentials to Watch" form is **replaced** by a **Network** section holding a persistent, user-managed list of **at most 4** saved networks (the cap mirrors the anchor's credential slots — keep the two equal). Password masked with an eye reveal; edits re-push to the watch and re-offer to distressed anchors. An **empty** list warns on **every** startup (Ignore = this launch only, Fix = add a network) because it silently breaks all anchor behavior. Passwords live in `flutter_secure_storage`.
+- **Sync state (§8.16):** staleness is **derived** (per-payload revision vs. per-device *acked* revision), never a stored flag; unconfirmed counts as stale. Any authoring change **auto-syncs**: push if connected, else scan+connect+push, else the device goes **yellow** in Devices with a "Sync now" retry. Yellow only after an attempt settles (spinner while in flight); it's informational, never red. A withheld §8.9 loosening is **not** stale. Sync state, liveness (§8.7), and pending changes (§8.9) are three distinct indicators.
 - **Calibration (§8.5):** ship the guided walk-around flow with a **donut progress ring** (live Prox Score shown inside), driven best-effort by **phone-IMU movement time**.
 - **Scope this pass:** fingerprint upload = debug-only stub; **Mode C deferred** but design the phone-distance UI to accommodate it later; guided calibration shipped.
 - **Tech (§2, §9):** state management = agent's choice (be consistent); persistence = **`drift` (mandatory) for the pending-changes queue, pass ledger, and audit trail**, `shared_preferences` for simple prefs/device records; notifications = `flutter_local_notifications`, local-only; minimum platform versions unpinned (use the APIs you need — revisit later).
@@ -435,5 +613,6 @@ These are settled and already reflected in the cited sections; this is a fast in
 
 - **Sunrise Lock mechanics — resolved in firmware spec v0.6 (§5.4.4):** window-start unworn beeping + per-event `donningGraceS`. The template builder's parameter set is final (§8.8); firmware *implementation* is pending, tracked in firmware §0.1 as part of the lockstep batch.
 - The precise **completion heuristic** for guided calibration (IMU movement-time target + duration) — the UI ships regardless; tune the threshold during testing (§8.5).
+- **Status-characteristic version prefix (deferred — not in v1.3, tracked in firmware §10.1).** Watch Status (`…0016`) and anchor WiFi Status (`…000E`) carry no version/length prefix, so each field addition is an exact-byte lockstep change with no graceful degradation (v0.8 adds `schedule_crc` — the third such growth to Watch Status). Fine while every device is flashed together; if staged/OTA rollouts ever create mixed-firmware fleets, add a 1-byte version to both so older parsers can skip unknown trailing fields. When that lands, the app's status parsers become version-aware; until then they assume the current layout.
 
 
