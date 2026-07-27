@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter_blue_plus/flutter_blue_plus.dart' as fbp;
 
 import '../models/bluetooth_device_model.dart';
 import '../services/watch_service.dart';
@@ -27,38 +28,31 @@ class CalibrationScreen extends StatefulWidget {
   State<CalibrationScreen> createState() => _CalibrationScreenState();
 }
 
+enum _Phase { starting, bursting, finishing, done }
+
 class _CalibrationScreenState extends State<CalibrationScreen> {
   /// Requested burst length; the watch clamps to its own bounds.
   static const _durationS = 90;
 
-  /// Accepted-sample count at which the ring reads "full". A near, unambiguous
-  /// walk-around reaches this well within [_durationS]; the anchor keeps
-  /// learning on its own afterwards regardless.
-  static const _targetAccepted = 25;
-
-  StreamSubscription<CalibrationProgress>? _sub;
-
-  CalibrationProgress? _progress;
   String? _error; // non-null → fatal pre-flight problem, nothing was started
-  bool _started = false;
+  _Phase _phase = _Phase.starting;
+  int _elapsedS = 0;
+  Timer? _ticker;
 
-  bool get _finished =>
-      _progress != null &&
-      (_progress!.state == CalibrationState.done ||
-          _progress!.state == CalibrationState.aborted ||
-          _progress!.accepted >= _targetAccepted);
+  /// The watch device, captured before we disconnect so we can reconnect at the
+  /// end to read the result (Option A, §8.5).
+  fbp.BluetoothDevice? _watchDevice;
 
-  double get _ringProgress => _progress == null
-      ? 0.0
-      : (_progress!.accepted / _targetAccepted).clamp(0.0, 1.0);
+  /// Final progress frame read after reconnecting; null until the burst ends.
+  CalibrationProgress? _result;
 
-  /// Watch is querying but the anchor isn't accepting samples yet — usually the
-  /// user needs to move closer / into the room.
-  bool get _stalled =>
-      !_finished &&
-      _progress != null &&
-      _progress!.queries >= 5 &&
-      _progress!.accepted == 0;
+  bool get _finished => _phase == _Phase.done;
+  // Option A: the app is disconnected during the burst, so there's no live
+  // accepted-sample count — the ring fills by elapsed walking time (§8.5's
+  // documented fallback), and the real learned-count is read at the end.
+  double get _ringProgress =>
+      _finished ? 1.0 : (_elapsedS / _durationS).clamp(0.0, 1.0);
+  int get _remainingS => (_durationS - _elapsedS).clamp(0, _durationS);
 
   @override
   void initState() {
@@ -88,19 +82,61 @@ class _CalibrationScreenState extends State<CalibrationScreen> {
       return;
     }
 
-    _sub = ws.calibrationStream.listen((p) {
-      if (!mounted) return;
-      setState(() => _progress = p);
-    });
+    _watchDevice = ws.device; // capture for the end-of-burst reconnect
 
     try {
       await ws.startCalibration(widget.anchor.id, durationS: _durationS);
-      if (mounted) setState(() => _started = true);
     } catch (e) {
-      if (mounted) {
-        setState(() => _error = 'Could not start calibration: $e');
-      }
+      if (mounted) setState(() => _error = 'Could not start calibration: $e');
+      return;
     }
+
+    // Option A (§8.5): this watch firmware can't do a central connect to the
+    // anchor while holding the phone (peripheral) link — it crashes NimBLE. So
+    // the watch only bursts while the phone is DISCONNECTED. Drop the watch link
+    // for the burst and reconnect at the end to read the result.
+    try { await ws.disconnect(); } catch (_) {}
+
+    if (!mounted) return;
+    setState(() { _phase = _Phase.bursting; _elapsedS = 0; });
+
+    _ticker = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted) return;
+      setState(() => _elapsedS++);
+      if (_elapsedS >= _durationS) _finishBurst();
+    });
+  }
+
+  /// Burst duration elapsed → reconnect, read the learned-sample count, and
+  /// restore the app's watch link.
+  Future<void> _finishBurst() async {
+    _ticker?.cancel();
+    if (!mounted) return;
+    setState(() => _phase = _Phase.finishing);
+
+    final ws = WatchService();
+    CalibrationProgress? result;
+    final dev = _watchDevice;
+    if (dev != null) {
+      try {
+        await ws.connect(dev);
+        result = await ws.readCalibrationProgress();
+        await ws.stopCalibration(); // ensure the session is closed on the watch
+      } catch (_) {}
+    }
+    if (!mounted) return;
+    setState(() { _result = result; _phase = _Phase.done; });
+  }
+
+  /// User tapped Stop mid-burst: reconnect, tell the watch to stop, leave.
+  Future<void> _stopEarly() async {
+    _ticker?.cancel();
+    final ws = WatchService();
+    final dev = _watchDevice;
+    try {
+      if (dev != null && !ws.isConnected) await ws.connect(dev);
+      await ws.stopCalibration();
+    } catch (_) {}
   }
 
   static bool _looksLikeUuid(String s) =>
@@ -110,9 +146,19 @@ class _CalibrationScreenState extends State<CalibrationScreen> {
 
   @override
   void dispose() {
-    _sub?.cancel();
-    // Best-effort stop so the watch doesn't keep bursting after we leave.
-    if (_started && !_finished) WatchService().stopCalibration();
+    _ticker?.cancel();
+    // Bailed out mid-burst → best-effort reconnect + stop so the watch doesn't
+    // keep bursting and the app link is restored. Fire-and-forget (no `this`).
+    if (_phase == _Phase.bursting) {
+      final ws = WatchService();
+      final dev = _watchDevice;
+      unawaited(() async {
+        try {
+          if (dev != null && !ws.isConnected) await ws.connect(dev);
+          await ws.stopCalibration();
+        } catch (_) {}
+      }());
+    }
     super.dispose();
   }
 
@@ -156,8 +202,24 @@ class _CalibrationScreenState extends State<CalibrationScreen> {
   }
 
   Widget _buildRunning() {
-    final p = _progress;
-    final scoreLabel = p == null ? '…' : '${p.lastScore}';
+    final finishing = _phase == _Phase.finishing;
+    final learned = _result?.accepted;
+
+    // Donut centre + caption per phase. During the burst the phone is
+    // disconnected from the watch, so we show a walking-time countdown rather
+    // than a live score (Option A, §8.5).
+    final String centreBig;
+    final String centreSub;
+    if (_finished) {
+      centreBig = learned != null ? '$learned' : '✓';
+      centreSub = learned != null ? 'samples learned' : 'calibrated';
+    } else if (finishing) {
+      centreBig = '…';
+      centreSub = 'wrapping up';
+    } else {
+      centreBig = '${_remainingS}s';
+      centreSub = 'walking time left';
+    }
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -176,9 +238,11 @@ class _CalibrationScreenState extends State<CalibrationScreen> {
         Text(
           _finished
               ? 'It keeps learning on its own from here.'
-              : 'Keep your watch on and wander near the anchor — cross the '
-                  'room, turn around, come back. Your watch is teaching the '
-                  'anchor what "here" looks like.',
+              : finishing
+                  ? 'Reconnecting to your watch to read the results…'
+                  : 'Keep your watch on and wander near the anchor — cross the '
+                      'room, turn around, come back. Keep the app open; your '
+                      'watch works with the anchor directly during this.',
           textAlign: TextAlign.center,
           style: const TextStyle(color: AppTheme.textGrey, fontSize: 13),
         ),
@@ -198,50 +262,21 @@ class _CalibrationScreenState extends State<CalibrationScreen> {
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
                     Text(
-                      scoreLabel,
+                      centreBig,
                       style: const TextStyle(
                           color: AppTheme.textWhite,
                           fontSize: 44,
                           fontWeight: FontWeight.bold),
                     ),
-                    const Text('live closeness score',
-                        style:
-                            TextStyle(color: AppTheme.textGrey, fontSize: 11)),
-                    if (p?.fingerprintActive == true)
-                      const Padding(
-                        padding: EdgeInsets.only(top: 4),
-                        child: Text('fingerprint active ✓',
-                            style: TextStyle(
-                                color: Colors.lightGreen, fontSize: 11)),
-                      ),
+                    Text(centreSub,
+                        style: const TextStyle(
+                            color: AppTheme.textGrey, fontSize: 11)),
                   ],
                 ),
               ),
             ),
           ),
         ),
-        const SizedBox(height: 16),
-        Center(
-          child: Text(
-            _finished
-                ? '${p?.accepted ?? 0} samples learned'
-                : p == null
-                    ? 'Starting…'
-                    : '${p.accepted}/$_targetAccepted samples learned · '
-                        '${p.remainingS}s left',
-            style: const TextStyle(color: AppTheme.textGrey, fontSize: 12),
-          ),
-        ),
-        if (_stalled)
-          const Padding(
-            padding: EdgeInsets.only(top: 8),
-            child: Text(
-              'Move closer to the anchor — your watch is checking in but '
-              "isn't near enough for it to learn yet.",
-              textAlign: TextAlign.center,
-              style: TextStyle(color: Colors.amber, fontSize: 12),
-            ),
-          ),
         const Spacer(),
         ElevatedButton(
           style: ElevatedButton.styleFrom(
@@ -249,10 +284,12 @@ class _CalibrationScreenState extends State<CalibrationScreen> {
             foregroundColor: AppTheme.darkGrey,
             padding: const EdgeInsets.symmetric(vertical: 14),
           ),
-          onPressed: () async {
-            if (!_finished) await WatchService().stopCalibration();
-            if (mounted) Navigator.of(context).maybePop();
-          },
+          onPressed: finishing
+              ? null
+              : () async {
+                  if (!_finished) await _stopEarly();
+                  if (mounted) Navigator.of(context).maybePop();
+                },
           child: Text(_finished ? 'Done' : 'Stop',
               style: const TextStyle(fontWeight: FontWeight.bold)),
         ),

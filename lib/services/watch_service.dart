@@ -536,6 +536,21 @@ class WatchService {
     await _calibChar!.write([0x00], withoutResponse: false);
   }
 
+  /// Read the latest calibration progress frame directly (§8.5 Option A). During
+  /// a burst the watch only queries the anchor while the phone is disconnected,
+  /// so the app reconnects afterward and reads the final result here rather than
+  /// relying on live notifications. Null if the feature is absent or the read
+  /// fails.
+  Future<CalibrationProgress?> readCalibrationProgress() async {
+    if (_calibChar == null) return null;
+    try {
+      final bytes = await _calibChar!.read();
+      return CalibrationProgress.fromBytes(bytes);
+    } catch (_) {
+      return null;
+    }
+  }
+
   void _bindCharacteristics(List<fbp.BluetoothService> services) {
     for (final svc in services) {
       if (svc.serviceUuid.str.toLowerCase() ==
