@@ -8,6 +8,7 @@ import '../models/bluetooth_device_model.dart';
 import '../models/device_sync_state.dart';
 import '../services/anchor_service.dart';
 import '../services/bluetooth_service.dart';
+import '../services/calibration_store.dart';
 import '../services/watch_service.dart';
 import '../services/automation_service.dart';
 import '../state/app_state.dart';
@@ -26,6 +27,7 @@ class _DevicesScreenState extends State<DevicesScreen> {
   final _btService    = BluetoothService();
   final _watchService = WatchService();
   final _autoService  = AutomationService();
+  final _calibStore   = CalibrationStore();
 
   bool _isScanning    = false;
   bool _isPushing     = false;
@@ -43,6 +45,7 @@ class _DevicesScreenState extends State<DevicesScreen> {
   Future<void> _init() async {
     await _btService.initialize();
     await _autoService.initialize();
+    try { await _calibStore.load(); } catch (_) {}
     _statusSub = _watchService.statusStream.listen((s) {
       if (mounted) setState(() => _watchStatus = s);
     });
@@ -171,6 +174,41 @@ class _DevicesScreenState extends State<DevicesScreen> {
     } catch (e) {
       setState(() { _isPushing = false; _statusMsg = 'Error: $e'; });
     }
+  }
+
+  // ── Calibration status badge ──────────────────────────────────────────────
+
+  /// "calibrated ✓ (threshold N)" vs "not calibrated", from the local
+  /// calibration cache updated whenever a guided calibration FINALIZEs.
+  Widget _buildCalibrationStatus(BluetoothDeviceModel anchor) {
+    final rec = _calibStore.recordFor(anchor.id);
+    if (rec == null) {
+      return const Padding(
+        padding: EdgeInsets.only(top: 2),
+        child: Text('Not calibrated',
+            style: TextStyle(color: AppTheme.textGrey, fontSize: 12)),
+      );
+    }
+    final confident = rec.isConfident && rec.nearThreshold > 0;
+    return Padding(
+      padding: const EdgeInsets.only(top: 2),
+      child: Row(
+        children: [
+          Icon(confident ? Icons.check_circle : Icons.warning_amber_rounded,
+              size: 13,
+              color: confident ? Colors.lightGreen : Colors.amber),
+          const SizedBox(width: 4),
+          Text(
+            confident
+                ? 'Calibrated · threshold ${rec.nearThreshold}'
+                : 'Calibrated (low confidence)',
+            style: TextStyle(
+                color: confident ? Colors.lightGreen : Colors.amber,
+                fontSize: 12),
+          ),
+        ],
+      ),
+    );
   }
 
   // ── Anchor identify ───────────────────────────────────────────────────────
@@ -442,6 +480,7 @@ class _DevicesScreenState extends State<DevicesScreen> {
             if (anchor.ipAddress != null)
               Text('IP: ${anchor.ipAddress}',
                   style: const TextStyle(color: AppTheme.textGrey, fontSize: 12)),
+            _buildCalibrationStatus(anchor),
           ],
         ),
         trailing: Row(
@@ -459,8 +498,14 @@ class _DevicesScreenState extends State<DevicesScreen> {
               tooltip: 'Calibrate closeness',
               onPressed: anchor.bleRemoteId == null
                   ? null
-                  : () => Navigator.of(context).push(MaterialPageRoute(
-                      builder: (_) => CalibrationScreen(anchor: anchor))),
+                  : () async {
+                      await Navigator.of(context).push(MaterialPageRoute(
+                          builder: (_) => CalibrationScreen(anchor: anchor)));
+                      // A calibration may have just persisted a threshold —
+                      // refresh the badge.
+                      try { await _calibStore.load(); } catch (_) {}
+                      if (mounted) setState(() {});
+                    },
             ),
             IconButton(
               icon: const Icon(Icons.settings_outlined,

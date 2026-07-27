@@ -14,7 +14,30 @@ import 'debug_log_service.dart';
 
 /// State of an app-guided calibration burst, reported by the watch on
 /// `WATCH_CALIB_CTRL_CHAR_UUID` (firmware §4.10.7 / §5.6).
-enum CalibrationState { idle, running, done, aborted }
+enum CalibrationState { idle, running, done, aborted, finalized }
+
+/// Calibration-v2 phase the app drives the anchor through (decision 1). INSIDE
+/// = roam the near-zone you want counted; EDGE = step just past your tolerance.
+enum CalibrationPhase { none, inside, edge }
+
+/// Result of the FINALIZE step: the per-anchor near-zone threshold the anchor
+/// computed + persisted, with the demonstrated sample counts and a confidence
+/// (0 = low — INSIDE/EDGE score distributions overlapped, offer a redo).
+class CalibrationResult {
+  final int nearThreshold; // 0..255 score-space cutoff (0 = fell back to global)
+  final int insideN;
+  final int edgeN;
+  final int confidence;    // 0 = low/overlap … 255 = clean separation
+  const CalibrationResult({
+    required this.nearThreshold,
+    required this.insideN,
+    required this.edgeN,
+    required this.confidence,
+  });
+
+  /// True when the demonstration cleanly separated inside from edge.
+  bool get isConfident => confidence > 0;
+}
 
 /// One progress frame from the watch during a calibration burst. The burst runs
 /// on the watch (it authors real-MAC scan vectors the anchor can actually train
@@ -42,6 +65,11 @@ class CalibrationProgress {
   /// Seconds remaining in the session.
   final int remainingS;
 
+  /// FINALIZE result (calibration-v2), present once [state] is
+  /// [CalibrationState.finalized] (and the watch reported `have_result`). Null
+  /// during INSIDE/EDGE bursts or on a pre-v2 (9-byte) frame.
+  final CalibrationResult? result;
+
   const CalibrationProgress({
     required this.state,
     required this.accepted,
@@ -49,17 +77,30 @@ class CalibrationProgress {
     required this.lastScore,
     required this.fingerprintActive,
     required this.remainingS,
+    this.result,
   });
 
-  /// Parse the 9-byte notify payload (firmware §5.6). Returns null if malformed.
+  /// Parse the watch progress payload. The calibration-v2 frame is 16 bytes with
+  /// a trailing result block; the legacy frame is 9 bytes (no result). Returns
+  /// null if malformed.
   static CalibrationProgress? fromBytes(List<int> b) {
     if (b.length < 9) return null;
     CalibrationState st;
     switch (b[0]) {
-      case 1:  st = CalibrationState.running; break;
-      case 2:  st = CalibrationState.done;    break;
-      case 3:  st = CalibrationState.aborted; break;
+      case 1:  st = CalibrationState.running;   break;
+      case 2:  st = CalibrationState.done;      break;
+      case 3:  st = CalibrationState.aborted;   break;
+      case 4:  st = CalibrationState.finalized; break;
       default: st = CalibrationState.idle;
+    }
+    CalibrationResult? res;
+    if (b.length >= 16 && b[15] != 0) {
+      res = CalibrationResult(
+        nearThreshold: b[9],
+        insideN: b[10] | (b[11] << 8),
+        edgeN: b[12] | (b[13] << 8),
+        confidence: b[14],
+      );
     }
     return CalibrationProgress(
       state: st,
@@ -68,6 +109,7 @@ class CalibrationProgress {
       lastScore: b[5],
       fingerprintActive: (b[6] & 0x01) != 0,
       remainingS: b[7] | (b[8] << 8),
+      result: res,
     );
   }
 }
@@ -518,8 +560,13 @@ class WatchService {
   /// (the anchor's 16-byte UUID, as a GUID string). The watch bursts real-MAC
   /// scan vectors at that anchor to fill its fingerprint fast; progress arrives
   /// on [calibrationStream]. [durationS] is clamped by the watch (0 ⇒ default).
+  ///
+  /// Calibration-v2: [phase] labels the burst — INSIDE (roam the near-zone,
+  /// trains + collects) or EDGE (step just past the limit, collects only). The
+  /// watch drives the anchor's …000F Calibration Mode to match while bursting.
   /// Throws [StateError] if the watch isn't connected or lacks the feature.
-  Future<void> startCalibration(String anchorUuid, {int durationS = 0}) async {
+  Future<void> startCalibration(String anchorUuid,
+      {int durationS = 0, CalibrationPhase phase = CalibrationPhase.inside}) async {
     if (_calibChar == null) {
       throw StateError('Watch does not support calibration (update firmware)');
     }
@@ -527,7 +574,48 @@ class WatchService {
     buf.addByte(0x01);                                   // START
     buf.add(ScheduleEncoder.uuidToBytes(anchorUuid));    // 16-byte target
     buf.add([durationS & 0xFF, (durationS >> 8) & 0xFF]); // uint16 LE
+    buf.addByte(_phaseByte(phase));                      // calibration-v2 phase
     await _calibChar!.write(buf.toBytes(), withoutResponse: false);
+  }
+
+  /// Convenience alias for switching phase mid-calibration: re-issues START with
+  /// a new [phase] (and duration), which the watch treats as a fresh phased burst.
+  Future<void> setCalibrationPhase(String anchorUuid, CalibrationPhase phase,
+          {int durationS = 0}) =>
+      startCalibration(anchorUuid, durationS: durationS, phase: phase);
+
+  /// Request the watch to FINALIZE calibration for [anchorUuid]: the anchor
+  /// computes + persists its per-anchor threshold and returns the result frame,
+  /// which the watch surfaces on [calibrationStream] as a
+  /// [CalibrationState.finalized] progress with a [CalibrationResult]. Because
+  /// the watch must reconnect to the anchor (Option A), the caller should
+  /// disconnect the phone afterward and reconnect to read the result.
+  Future<void> finalizeCalibration(String anchorUuid) async {
+    if (_calibChar == null) {
+      throw StateError('Watch does not support calibration (update firmware)');
+    }
+    final buf = BytesBuilder(copy: false);
+    buf.addByte(0x02);                                   // FINALIZE
+    buf.add(ScheduleEncoder.uuidToBytes(anchorUuid));    // 16-byte target
+    await _calibChar!.write(buf.toBytes(), withoutResponse: false);
+  }
+
+  /// Abort an in-progress calibration for [anchorUuid]: the anchor discards the
+  /// in-progress INSIDE/EDGE stats (keeps any previously persisted threshold).
+  Future<void> abortCalibration(String anchorUuid) async {
+    if (_calibChar == null) return;
+    final buf = BytesBuilder(copy: false);
+    buf.addByte(0x03);                                   // ABORT
+    buf.add(ScheduleEncoder.uuidToBytes(anchorUuid));    // 16-byte target
+    await _calibChar!.write(buf.toBytes(), withoutResponse: false);
+  }
+
+  static int _phaseByte(CalibrationPhase p) {
+    switch (p) {
+      case CalibrationPhase.inside: return 1;
+      case CalibrationPhase.edge:   return 2;
+      case CalibrationPhase.none:   return 0;
+    }
   }
 
   /// Stop an in-progress calibration burst. No-op if the feature is absent.

@@ -21,6 +21,7 @@ class BleConstants {
   static const String anchorFpDataCharUuid     = '4a0f000b-f8ce-11ee-8001-020304050607'; // fingerprint data
   static const String anchorDockRegisterCharUuid = '4a0f000c-f8ce-11ee-8001-020304050607'; // dock register
   static const String anchorDockStatusCharUuid   = '4a0f000d-f8ce-11ee-8001-020304050607'; // dock status
+  static const String anchorCalibModeCharUuid    = '4a0f000f-f8ce-11ee-8001-020304050607'; // calibration-v2 phase (…000F)
 
   // ── Watch ─────────────────────────────────────────────────────────────────
   static const String watchServiceUuid         = '4a0f0010-f8ce-11ee-8001-020304050607';
