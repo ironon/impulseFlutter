@@ -10,6 +10,68 @@ import '../utils/ble_constants.dart';
 import '../utils/schedule_encoder.dart';
 import 'debug_log_service.dart';
 
+// ── Calibration progress model (§4.10.7) ─────────────────────────────────────
+
+/// State of an app-guided calibration burst, reported by the watch on
+/// `WATCH_CALIB_CTRL_CHAR_UUID` (firmware §4.10.7 / §5.6).
+enum CalibrationState { idle, running, done, aborted }
+
+/// One progress frame from the watch during a calibration burst. The burst runs
+/// on the watch (it authors real-MAC scan vectors the anchor can actually train
+/// on — see firmware §4.10.7 for why the phone cannot); this is read-only
+/// telemetry the app renders.
+class CalibrationProgress {
+  /// Session state.
+  final CalibrationState state;
+
+  /// Samples the anchor folded into its fingerprint this session — real
+  /// learning progress. Drive the UI from this, not elapsed time.
+  final int accepted;
+
+  /// Total queries the watch has attempted this session. If this climbs while
+  /// [accepted] stays at 0, the watch is querying but not near/unambiguous
+  /// enough for the anchor to accept training (e.g. anchor out of range).
+  final int queries;
+
+  /// Most recent proximity score (0 = away … 255 = here).
+  final int lastScore;
+
+  /// Whether the anchor's fingerprint is contributing to the score (flags bit0).
+  final bool fingerprintActive;
+
+  /// Seconds remaining in the session.
+  final int remainingS;
+
+  const CalibrationProgress({
+    required this.state,
+    required this.accepted,
+    required this.queries,
+    required this.lastScore,
+    required this.fingerprintActive,
+    required this.remainingS,
+  });
+
+  /// Parse the 9-byte notify payload (firmware §5.6). Returns null if malformed.
+  static CalibrationProgress? fromBytes(List<int> b) {
+    if (b.length < 9) return null;
+    CalibrationState st;
+    switch (b[0]) {
+      case 1:  st = CalibrationState.running; break;
+      case 2:  st = CalibrationState.done;    break;
+      case 3:  st = CalibrationState.aborted; break;
+      default: st = CalibrationState.idle;
+    }
+    return CalibrationProgress(
+      state: st,
+      accepted: b[1] | (b[2] << 8),
+      queries: b[3] | (b[4] << 8),
+      lastScore: b[5],
+      fingerprintActive: (b[6] & 0x01) != 0,
+      remainingS: b[7] | (b[8] << 8),
+    );
+  }
+}
+
 // ── WatchStatus model ────────────────────────────────────────────────────────
 
 /// A queued "couldn't reach this beep-anchor" notification (§8.7).
@@ -253,15 +315,21 @@ class WatchService {
   fbp.BluetoothCharacteristic? _timeChar;
   fbp.BluetoothCharacteristic? _pendingChar;
   fbp.BluetoothCharacteristic? _emergencyPassChar;
+  fbp.BluetoothCharacteristic? _calibChar;
 
   StreamSubscription<List<int>>? _statusSub;
   StreamSubscription<List<int>>? _seenAnchorsSub;
+  StreamSubscription<List<int>>? _calibSub;
 
   final _statusController       = StreamController<WatchStatus>.broadcast();
   final _seenAnchorsController  = StreamController<List<SeenAnchorInfo>>.broadcast();
+  final _calibController        = StreamController<CalibrationProgress>.broadcast();
 
   Stream<WatchStatus>          get statusStream       => _statusController.stream;
   Stream<List<SeenAnchorInfo>> get seenAnchorsStream  => _seenAnchorsController.stream;
+
+  /// Progress frames from an app-guided calibration burst (§4.10.7).
+  Stream<CalibrationProgress>  get calibrationStream  => _calibController.stream;
 
   bool get isConnected => _device != null &&
       (_device!.isConnected);
@@ -284,8 +352,10 @@ class WatchService {
   Future<void> disconnect() async {
     await _statusSub?.cancel();
     await _seenAnchorsSub?.cancel();
+    await _calibSub?.cancel();
     _statusSub = null;
     _seenAnchorsSub = null;
+    _calibSub = null;
     await _device?.disconnect();
     _device = null;
     _gattService = null;
@@ -303,6 +373,7 @@ class WatchService {
     _timeChar        = null;
     _pendingChar     = null;
     _emergencyPassChar = null;
+    _calibChar       = null;
   }
 
   // ── Runtime capability probes (§8.11, §9.5/§9.6) ──────────────────────────
@@ -312,6 +383,7 @@ class WatchService {
   bool get hasTimeCharacteristic          => _timeChar != null;
   bool get hasPendingChangesCharacteristic => _pendingChar != null;
   bool get hasEmergencyPassCharacteristic  => _emergencyPassChar != null;
+  bool get hasCalibrationCharacteristic    => _calibChar != null;
 
   /// Set the watch clock over BLE (§8.11): `[utc_epoch int64][tz_offset int16]`.
   /// Returns the response byte (0x01 ok; 0x02 rejected — would end the active
@@ -440,6 +512,30 @@ class WatchService {
         onTimeout: () { sub.cancel(); return null; });
   }
 
+  // ── Calibration burst (§4.10.7) ──────────────────────────────────────────
+
+  /// Start an app-guided calibration burst on the watch, targeting [anchorUuid]
+  /// (the anchor's 16-byte UUID, as a GUID string). The watch bursts real-MAC
+  /// scan vectors at that anchor to fill its fingerprint fast; progress arrives
+  /// on [calibrationStream]. [durationS] is clamped by the watch (0 ⇒ default).
+  /// Throws [StateError] if the watch isn't connected or lacks the feature.
+  Future<void> startCalibration(String anchorUuid, {int durationS = 0}) async {
+    if (_calibChar == null) {
+      throw StateError('Watch does not support calibration (update firmware)');
+    }
+    final buf = BytesBuilder(copy: false);
+    buf.addByte(0x01);                                   // START
+    buf.add(ScheduleEncoder.uuidToBytes(anchorUuid));    // 16-byte target
+    buf.add([durationS & 0xFF, (durationS >> 8) & 0xFF]); // uint16 LE
+    await _calibChar!.write(buf.toBytes(), withoutResponse: false);
+  }
+
+  /// Stop an in-progress calibration burst. No-op if the feature is absent.
+  Future<void> stopCalibration() async {
+    if (_calibChar == null) return;
+    await _calibChar!.write([0x00], withoutResponse: false);
+  }
+
   void _bindCharacteristics(List<fbp.BluetoothService> services) {
     for (final svc in services) {
       if (svc.serviceUuid.str.toLowerCase() ==
@@ -457,6 +553,7 @@ class WatchService {
           if (uuid == BleConstants.watchTimeCharUuid)        _timeChar        = c;
           if (uuid == BleConstants.watchPendingCharUuid)     _pendingChar     = c;
           if (uuid == BleConstants.watchEmergencyPassCharUuid) _emergencyPassChar = c;
+          if (uuid == BleConstants.watchCalibCtrlCharUuid)   _calibChar       = c;
         }
         break;
       }
@@ -520,6 +617,21 @@ class WatchService {
           dbg.log('seen_anchors (read)', 'count=${anchors.length}  $summary', val);
         }
       } catch (_) {}
+    }
+
+    // Calibration burst progress (§4.10.7) — probe: absent on pre-calibration
+    // firmware. Only notifies while a burst is running, so subscribing here is
+    // idle-cheap.
+    if (_calibChar != null) {
+      await _calibChar!.setNotifyValue(true);
+      _calibSub = _calibChar!.onValueReceived.listen((bytes) {
+        final p = CalibrationProgress.fromBytes(bytes);
+        if (p == null) return;
+        _calibController.add(p);
+        dbg.log('calib',
+            'state=${p.state.name} accepted=${p.accepted} queries=${p.queries} '
+            'score=${p.lastScore} rem=${p.remainingS}s', bytes);
+      });
     }
   }
 

@@ -35,6 +35,7 @@ class BleConstants {
   static const String watchTimeCharUuid        = '4a0f0019-f8ce-11ee-8001-020304050607'; // §8.11 (probe)
   static const String watchPendingCharUuid     = '4a0f001a-f8ce-11ee-8001-020304050607'; // §9.5 (probe)
   static const String watchEmergencyPassCharUuid = '4a0f001b-f8ce-11ee-8001-020304050607'; // §9.6 (probe)
+  static const String watchCalibCtrlCharUuid   = '4a0f001c-f8ce-11ee-8001-020304050607'; // §4.10.7 calibration burst (probe)
 
   // ── Manufacturer data ─────────────────────────────────────────────────────
   // Custom company ID (0xFFFF) used in place of Apple's 0x004C so that iOS

@@ -2,21 +2,22 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
-import 'package:sensors_plus/sensors_plus.dart';
 
 import '../models/bluetooth_device_model.dart';
-import '../services/anchor_telemetry_service.dart';
+import '../services/watch_service.dart';
 import '../theme/app_theme.dart';
 
-/// Guided walk-around calibration (§8.5): the user moves around near the
-/// anchor while it collects high-confidence training samples (this is what
-/// self-supervision does, sped up). A donut progress ring fills as real
-/// movement accumulates, with the live Prox Score shown inside so the user
-/// sees proof it's working rather than just a countdown.
+/// App-guided calibration (firmware §4.10.7). The *watch* — not the phone —
+/// does the work: while the user walks around near the anchor, the watch bursts
+/// its real-MAC scan vectors at that anchor so the anchor's fingerprint
+/// (§4.10.4) fills in seconds instead of days. The phone only kicks off the
+/// burst over the watch link and renders the progress the watch reports.
 ///
-/// Progress driver (best-effort per spec): the phone's accelerometer
-/// accumulates "movement time" toward [targetMovement]; where the sensor is
-/// unavailable the ring degrades to plain elapsed time.
+/// Why not the phone: the fingerprint keys on raw on-air MAC/BSSID addresses,
+/// which iOS never exposes (and which BLE-privacy peers rotate), so a
+/// phone-scanned fingerprint could not align with what the anchor/watch see.
+/// The donut therefore fills by *accepted training samples* the anchor actually
+/// folded in — real learning — not by an elapsed-time animation.
 class CalibrationScreen extends StatefulWidget {
   const CalibrationScreen({super.key, required this.anchor});
 
@@ -27,27 +28,37 @@ class CalibrationScreen extends StatefulWidget {
 }
 
 class _CalibrationScreenState extends State<CalibrationScreen> {
-  static const targetMovement = Duration(seconds: 45);
-  static const _movementThreshold = 0.8; // m/s² of user acceleration
-  static const _tick = Duration(milliseconds: 250);
+  /// Requested burst length; the watch clamps to its own bounds.
+  static const _durationS = 90;
 
-  AnchorTelemetrySession? _session;
-  StreamSubscription<ProxScoreReading>? _proxSub;
-  StreamSubscription<UserAccelerometerEvent>? _imuSub;
-  Timer? _ticker;
+  /// Accepted-sample count at which the ring reads "full". A near, unambiguous
+  /// walk-around reaches this well within [_durationS]; the anchor keeps
+  /// learning on its own afterwards regardless.
+  static const _targetAccepted = 25;
 
-  bool _connecting = true;
-  bool _connected = false;
-  bool _sensorAvailable = true;
-  bool _moving = false;
-  Duration _accumulated = Duration.zero;
-  ProxScoreReading? _prox;
-  DateTime _lastImuEvent = DateTime.now();
+  StreamSubscription<CalibrationProgress>? _sub;
 
-  bool get _done => _accumulated >= targetMovement;
-  double get _progress =>
-      (_accumulated.inMilliseconds / targetMovement.inMilliseconds)
-          .clamp(0.0, 1.0);
+  CalibrationProgress? _progress;
+  String? _error; // non-null → fatal pre-flight problem, nothing was started
+  bool _started = false;
+
+  bool get _finished =>
+      _progress != null &&
+      (_progress!.state == CalibrationState.done ||
+          _progress!.state == CalibrationState.aborted ||
+          _progress!.accepted >= _targetAccepted);
+
+  double get _ringProgress => _progress == null
+      ? 0.0
+      : (_progress!.accepted / _targetAccepted).clamp(0.0, 1.0);
+
+  /// Watch is querying but the anchor isn't accepting samples yet — usually the
+  /// user needs to move closer / into the room.
+  bool get _stalled =>
+      !_finished &&
+      _progress != null &&
+      _progress!.queries >= 5 &&
+      _progress!.accepted == 0;
 
   @override
   void initState() {
@@ -56,68 +67,52 @@ class _CalibrationScreenState extends State<CalibrationScreen> {
   }
 
   Future<void> _start() async {
-    // Live prox feedback (read-only telemetry, §8.5).
-    if (widget.anchor.bleRemoteId != null) {
-      final session = AnchorTelemetrySession(widget.anchor.bleRemoteId!);
-      final ok = await session.connect();
-      if (!mounted) {
-        session.dispose();
-        return;
-      }
-      if (ok) {
-        _session = session;
-        _proxSub = session.proxStream.listen((r) {
-          if (mounted) setState(() => _prox = r);
-        });
-      }
-      setState(() {
-        _connecting = false;
-        _connected = ok;
-      });
-    } else {
-      setState(() {
-        _connecting = false;
-        _connected = false;
-      });
+    final ws = WatchService();
+
+    if (!ws.isConnected) {
+      setState(() => _error =
+          "Your watch isn't connected. Bring it near your phone, open the "
+          'Impulse app connection, and try again.');
+      return;
+    }
+    if (!ws.hasCalibrationCharacteristic) {
+      setState(() => _error =
+          "This watch's firmware doesn't support guided calibration yet. "
+          'Update the watch and try again.');
+      return;
+    }
+    if (!_looksLikeUuid(widget.anchor.id)) {
+      setState(() => _error =
+          "Couldn't identify this anchor. Re-scan for it on the Devices "
+          'screen and try again.');
+      return;
     }
 
-    // Movement driver: user-acceleration magnitude above threshold = moving.
-    try {
-      _imuSub = userAccelerometerEventStream().listen((e) {
-        final mag = math.sqrt(e.x * e.x + e.y * e.y + e.z * e.z);
-        _moving = mag > _movementThreshold;
-        _lastImuEvent = DateTime.now();
-      }, onError: (_) {
-        _sensorAvailable = false;
-      });
-    } catch (_) {
-      _sensorAvailable = false;
-    }
-
-    _ticker = Timer.periodic(_tick, (_) {
-      if (_done) {
-        _ticker?.cancel();
-        setState(() {});
-        return;
-      }
-      // No IMU events for 2 s ⇒ treat the sensor as unavailable (desktop /
-      // emulator) and fall back to plain elapsed time.
-      final sensorLive = _sensorAvailable &&
-          DateTime.now().difference(_lastImuEvent) < const Duration(seconds: 2);
-      if (!sensorLive || _moving) {
-        setState(() => _accumulated += _tick);
-      } else {
-        setState(() {}); // keep the score fresh
-      }
+    _sub = ws.calibrationStream.listen((p) {
+      if (!mounted) return;
+      setState(() => _progress = p);
     });
+
+    try {
+      await ws.startCalibration(widget.anchor.id, durationS: _durationS);
+      if (mounted) setState(() => _started = true);
+    } catch (e) {
+      if (mounted) {
+        setState(() => _error = 'Could not start calibration: $e');
+      }
+    }
   }
+
+  static bool _looksLikeUuid(String s) =>
+      RegExp(r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-'
+              r'[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')
+          .hasMatch(s);
 
   @override
   void dispose() {
-    _ticker?.cancel();
-    _proxSub?.cancel();
-    _imuSub?.cancel();
-    _session?.dispose();
+    _sub?.cancel();
+    // Best-effort stop so the watch doesn't keep bursting after we leave.
+    if (_started && !_finished) WatchService().stopCalibration();
     super.dispose();
   }
 
@@ -128,110 +123,140 @@ class _CalibrationScreenState extends State<CalibrationScreen> {
       body: SafeArea(
         child: Padding(
           padding: const EdgeInsets.all(20),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Text(
-                _done
-                    ? 'Done — this anchor has a feel for its room now.'
-                    : 'Walk around the room, phone in hand',
-                textAlign: TextAlign.center,
-                style: const TextStyle(
-                    color: AppTheme.textWhite,
-                    fontSize: 18,
-                    fontWeight: FontWeight.bold),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                _done
-                    ? 'It keeps learning on its own from here.'
-                    : 'Wander near the anchor — cross the room, turn around, '
-                        'come back. The anchor is learning what "here" looks '
-                        'like.',
-                textAlign: TextAlign.center,
-                style: const TextStyle(color: AppTheme.textGrey, fontSize: 13),
-              ),
-              const Spacer(),
-              Center(
-                child: SizedBox(
-                  width: 220,
-                  height: 220,
-                  child: CustomPaint(
-                    painter: _DonutPainter(
-                      progress: _progress,
-                      color:
-                          _done ? Colors.lightGreen : AppTheme.lightOrange,
-                      track: AppTheme.cardGrey,
-                    ),
-                    child: Center(
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          Text(
-                            _connecting
-                                ? '…'
-                                : (_prox == null
-                                    ? '—'
-                                    : '${_prox!.score}'),
-                            style: const TextStyle(
-                                color: AppTheme.textWhite,
-                                fontSize: 44,
-                                fontWeight: FontWeight.bold),
-                          ),
-                          const Text('live closeness score',
-                              style: TextStyle(
-                                  color: AppTheme.textGrey, fontSize: 11)),
-                          if (_prox?.fingerprintActive == true)
-                            const Padding(
-                              padding: EdgeInsets.only(top: 4),
-                              child: Text('fingerprint active ✓',
-                                  style: TextStyle(
-                                      color: Colors.lightGreen,
-                                      fontSize: 11)),
-                            ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 16),
-              Center(
-                child: Text(
-                  _done
-                      ? ''
-                      : '${(_progress * 100).round()}% · '
-                          '${(targetMovement - _accumulated).inSeconds}s of movement to go',
-                  style:
-                      const TextStyle(color: AppTheme.textGrey, fontSize: 12),
-                ),
-              ),
-              if (!_connected && !_connecting)
-                const Padding(
-                  padding: EdgeInsets.only(top: 8),
-                  child: Text(
-                    'Couldn\'t reach the anchor for a live score — the '
-                    'walk-around still helps it learn.',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(color: Colors.amber, fontSize: 12),
-                  ),
-                ),
-              const Spacer(),
-              ElevatedButton(
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: AppTheme.lightOrange,
-                  foregroundColor: AppTheme.darkGrey,
-                  padding: const EdgeInsets.symmetric(vertical: 14),
-                ),
-                onPressed:
-                    _done ? () => Navigator.of(context).maybePop() : null,
-                child: Text(_done ? 'Done' : 'Keep moving…',
-                    style: const TextStyle(fontWeight: FontWeight.bold)),
-              ),
-            ],
-          ),
+          child: _error != null ? _buildError() : _buildRunning(),
         ),
       ),
+    );
+  }
+
+  Widget _buildError() {
+    return Column(
+      mainAxisAlignment: MainAxisAlignment.center,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const Icon(Icons.error_outline, color: Colors.amber, size: 48),
+        const SizedBox(height: 16),
+        Text(
+          _error!,
+          textAlign: TextAlign.center,
+          style: const TextStyle(color: AppTheme.textWhite, fontSize: 15),
+        ),
+        const SizedBox(height: 24),
+        ElevatedButton(
+          style: ElevatedButton.styleFrom(
+            backgroundColor: AppTheme.lightOrange,
+            foregroundColor: AppTheme.darkGrey,
+            padding: const EdgeInsets.symmetric(vertical: 14),
+          ),
+          onPressed: () => Navigator.of(context).maybePop(),
+          child: const Text('Back', style: TextStyle(fontWeight: FontWeight.bold)),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildRunning() {
+    final p = _progress;
+    final scoreLabel = p == null ? '…' : '${p.lastScore}';
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text(
+          _finished
+              ? 'Done — this anchor has a feel for its room now.'
+              : 'Walk around the room, watch on your wrist',
+          textAlign: TextAlign.center,
+          style: const TextStyle(
+              color: AppTheme.textWhite,
+              fontSize: 18,
+              fontWeight: FontWeight.bold),
+        ),
+        const SizedBox(height: 8),
+        Text(
+          _finished
+              ? 'It keeps learning on its own from here.'
+              : 'Keep your watch on and wander near the anchor — cross the '
+                  'room, turn around, come back. Your watch is teaching the '
+                  'anchor what "here" looks like.',
+          textAlign: TextAlign.center,
+          style: const TextStyle(color: AppTheme.textGrey, fontSize: 13),
+        ),
+        const Spacer(),
+        Center(
+          child: SizedBox(
+            width: 220,
+            height: 220,
+            child: CustomPaint(
+              painter: _DonutPainter(
+                progress: _ringProgress,
+                color: _finished ? Colors.lightGreen : AppTheme.lightOrange,
+                track: AppTheme.cardGrey,
+              ),
+              child: Center(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Text(
+                      scoreLabel,
+                      style: const TextStyle(
+                          color: AppTheme.textWhite,
+                          fontSize: 44,
+                          fontWeight: FontWeight.bold),
+                    ),
+                    const Text('live closeness score',
+                        style:
+                            TextStyle(color: AppTheme.textGrey, fontSize: 11)),
+                    if (p?.fingerprintActive == true)
+                      const Padding(
+                        padding: EdgeInsets.only(top: 4),
+                        child: Text('fingerprint active ✓',
+                            style: TextStyle(
+                                color: Colors.lightGreen, fontSize: 11)),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(height: 16),
+        Center(
+          child: Text(
+            _finished
+                ? '${p?.accepted ?? 0} samples learned'
+                : p == null
+                    ? 'Starting…'
+                    : '${p.accepted}/$_targetAccepted samples learned · '
+                        '${p.remainingS}s left',
+            style: const TextStyle(color: AppTheme.textGrey, fontSize: 12),
+          ),
+        ),
+        if (_stalled)
+          const Padding(
+            padding: EdgeInsets.only(top: 8),
+            child: Text(
+              'Move closer to the anchor — your watch is checking in but '
+              "isn't near enough for it to learn yet.",
+              textAlign: TextAlign.center,
+              style: TextStyle(color: Colors.amber, fontSize: 12),
+            ),
+          ),
+        const Spacer(),
+        ElevatedButton(
+          style: ElevatedButton.styleFrom(
+            backgroundColor: AppTheme.lightOrange,
+            foregroundColor: AppTheme.darkGrey,
+            padding: const EdgeInsets.symmetric(vertical: 14),
+          ),
+          onPressed: () async {
+            if (!_finished) await WatchService().stopCalibration();
+            if (mounted) Navigator.of(context).maybePop();
+          },
+          child: Text(_finished ? 'Done' : 'Stop',
+              style: const TextStyle(fontWeight: FontWeight.bold)),
+        ),
+      ],
     );
   }
 }
