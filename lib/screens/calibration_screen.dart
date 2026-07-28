@@ -178,11 +178,70 @@ class _CalibrationScreenState extends State<CalibrationScreen> {
       setState(() => _elapsedS++);
       if (_elapsedS >= _phaseDurationS) {
         _ticker?.cancel();
-        final progress = await _reconnectAndRead();
+        // Reconnect and CONFIRM the calibration characteristic rediscovered before
+        // advancing. The old path swallowed reconnect failures and advanced anyway,
+        // so the next phase button hit a null characteristic and threw "watch
+        // doesn't support this feature". If we can't get a good link back, stop and
+        // show a retryable error instead of falling through into a broken state.
+        final ok = await _reconnectAndVerify();
+        if (!mounted) return;
+        if (!ok) {
+          setState(() {
+            _busy = false;
+            _error =
+                'Lost the connection to your watch after the walk. Bring the '
+                'watch close to your phone, then tap Back and start calibration '
+                'again.';
+          });
+          return;
+        }
+        final progress = await WatchService().readCalibrationProgress();
         if (!mounted) return;
         onComplete(progress);
       }
     });
+  }
+
+  /// Reconnect the watch link after a disconnected burst and CONFIRM the
+  /// calibration characteristic is actually present again before letting the flow
+  /// advance. This is the fix for the "watch doesn't support this feature" error
+  /// on a slow phase advance: the watch could drop to light sleep in the reconnect
+  /// gap, the app would reconnect onto a degraded link, fail to rediscover the
+  /// characteristic, and silently advance — then the next phase button threw.
+  ///
+  /// The firmware now holds the watch awake/connectable across this gap
+  /// (inter-phase awake window), so a clean rediscovery normally succeeds; we still
+  /// retry a few times and only report success once [hasCalibrationCharacteristic]
+  /// is true. Returns false if we never get a good link back.
+  Future<bool> _reconnectAndVerify() async {
+    final ws = WatchService();
+    final dev = _watchDevice;
+    if (dev == null) return false;
+    setState(() => _busy = true);
+    // Guard margin: let the watch's last anchor query and its radio settle before
+    // we bring the phone link back up, so the reconnect doesn't collide with watch
+    // activity at the phase boundary (pairs with the firmware quiet-tail).
+    await Future<void>.delayed(const Duration(seconds: 2));
+    for (var attempt = 0; attempt < 5; attempt++) {
+      if (!mounted) return false;
+      try {
+        if (!ws.isConnected) await ws.connect(dev);
+        if (ws.hasCalibrationCharacteristic) {
+          if (mounted) setState(() => _busy = false);
+          return true;
+        }
+        // Connected but the characteristic didn't rediscover — drop and retry; a
+        // fresh service discovery on the next connect usually resolves it.
+        await ws.disconnect();
+      } catch (_) {
+        try {
+          await ws.disconnect();
+        } catch (_) {}
+      }
+      await Future<void>.delayed(const Duration(seconds: 2));
+    }
+    if (mounted) setState(() => _busy = false);
+    return false;
   }
 
   /// Reconnect the watch link and read the latest progress frame.
