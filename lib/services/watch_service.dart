@@ -20,10 +20,28 @@ enum CalibrationState { idle, running, done, aborted, finalized }
 /// = roam the near-zone you want counted; EDGE = step just past your tolerance.
 enum CalibrationPhase { none, inside, edge }
 
+/// Why a calibration failed to produce a per-anchor threshold. The firmware
+/// returns confidence 0 for two very different reasons and the app must not
+/// conflate them: telling a user their walk was ambiguous when they in fact
+/// demonstrated it perfectly and merely stood still too briefly sends them off
+/// to fix the wrong thing.
+enum CalibrationFailure {
+  /// The demonstration worked; there simply were not enough samples in one leg.
+  tooFewSamples,
+
+  /// Enough samples, but the INSIDE and EDGE score distributions overlapped.
+  overlap,
+}
+
 /// Result of the FINALIZE step: the per-anchor near-zone threshold the anchor
 /// computed + persisted, with the demonstrated sample counts and a confidence
-/// (0 = low — INSIDE/EDGE score distributions overlapped, offer a redo).
+/// (0 = low — see [failure] for which of the two causes applies).
 class CalibrationResult {
+  /// Mirrors PROX_CALIB_MIN_SAMPLES in proximity.h. Below this in either leg the
+  /// firmware never reaches the distribution comparison at all — it returns the
+  /// global default threshold with confidence 0.
+  static const int minSamplesPerLeg = 5;
+
   final int nearThreshold; // 0..255 score-space cutoff (0 = fell back to global)
   final int insideN;
   final int edgeN;
@@ -37,6 +55,19 @@ class CalibrationResult {
 
   /// True when the demonstration cleanly separated inside from edge.
   bool get isConfident => confidence > 0;
+
+  /// Which leg (if any) came up short of [minSamplesPerLeg].
+  bool get insideStarved => insideN < minSamplesPerLeg;
+  bool get edgeStarved => edgeN < minSamplesPerLeg;
+
+  /// Null when the calibration succeeded. Sample starvation is checked first
+  /// because it short-circuits the firmware's comparison — if a leg is short,
+  /// nothing is known about whether the distributions would have separated.
+  CalibrationFailure? get failure {
+    if (isConfident) return null;
+    if (insideStarved || edgeStarved) return CalibrationFailure.tooFewSamples;
+    return CalibrationFailure.overlap;
+  }
 }
 
 /// One progress frame from the watch during a calibration burst. The burst runs

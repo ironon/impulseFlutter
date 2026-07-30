@@ -590,6 +590,41 @@ class _CalibrationScreenState extends State<CalibrationScreen> {
   }
 
   // Step 7 — result.
+  /// A calibration can fail two ways and they need opposite advice. Sample
+  /// starvation means the demonstration was fine and simply too short — the
+  /// firmware never got as far as comparing the distributions, so telling the
+  /// user their walk was ambiguous would send them to fix something that isn't
+  /// broken. Starvation is far more likely on the EDGE leg: further from the
+  /// anchor each reading takes seconds longer to collect.
+  String _failureTitle(CalibrationResult r) {
+    switch (r.failure) {
+      case CalibrationFailure.tooFewSamples:
+        return 'Not enough readings';
+      case CalibrationFailure.overlap:
+      case null:
+        return "Couldn't separate near from edge";
+    }
+  }
+
+  String _failureBody(CalibrationResult r) {
+    switch (r.failure) {
+      case CalibrationFailure.tooFewSamples:
+        final short = r.edgeStarved && r.insideStarved
+            ? 'Both parts'
+            : (r.edgeStarved ? 'The edge part' : 'The inside part');
+        return '$short came up short — ${r.insideN} inside · ${r.edgeN} edge, and '
+            'at least ${CalibrationResult.minSamplesPerLeg} of each are needed. '
+            'Your readings looked fine, there just were not enough of them. Try '
+            'again and stay put a little longer at each step, especially the '
+            'edge spot — readings come in more slowly further from the anchor.';
+      case CalibrationFailure.overlap:
+      case null:
+        return 'The inside and edge readings overlapped, so this anchor kept '
+            'the default boundary. Try again: make the inside walk and the '
+            'edge spot clearly different distances.';
+    }
+  }
+
   Widget _buildDone() {
     final r = _result!;
     final confident = r.isConfident;
@@ -602,9 +637,7 @@ class _CalibrationScreenState extends State<CalibrationScreen> {
             color: confident ? Colors.lightGreen : Colors.amber, size: 52),
         const SizedBox(height: 14),
         Text(
-          confident
-              ? 'Your $zoneWord is set'
-              : "Couldn't separate near from edge",
+          confident ? 'Your $zoneWord is set' : _failureTitle(r),
           textAlign: TextAlign.center,
           style: const TextStyle(
               color: AppTheme.textWhite,
@@ -616,9 +649,7 @@ class _CalibrationScreenState extends State<CalibrationScreen> {
           confident
               ? '${r.insideN} inside · ${r.edgeN} edge samples · '
                   'threshold ${r.nearThreshold}'
-              : 'The inside and edge readings overlapped, so this anchor kept '
-                  'the default boundary. Try again: make the inside walk and the '
-                  'edge spot clearly different distances.',
+              : _failureBody(r),
           textAlign: TextAlign.center,
           style: const TextStyle(color: AppTheme.textGrey, fontSize: 14),
         ),
@@ -631,7 +662,11 @@ class _CalibrationScreenState extends State<CalibrationScreen> {
           ),
         const Spacer(),
         if (!confident) ...[
-          _primaryButton('Redo calibration', _redo),
+          _primaryButton(
+              r.failure == CalibrationFailure.tooFewSamples
+                  ? 'Try again'
+                  : 'Redo calibration',
+              _redo),
           const SizedBox(height: 10),
           _secondaryButton('Keep default', () => Navigator.of(context).maybePop()),
         ] else ...[
