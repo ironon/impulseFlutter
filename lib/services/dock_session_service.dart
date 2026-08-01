@@ -108,9 +108,28 @@ class DockSessionService extends ChangeNotifier {
 
   bool get docked => _lastDock?.docked ?? false;
 
-  /// True once Dock Register has been written for this session — i.e. the
-  /// window is live and a dropped link must be chased, not shrugged off.
-  bool _registered = false;
+  /// The anchor↔phone link RSSI at or above which the anchor calls the phone
+  /// docked (`DOCK_RSSI_THRESHOLD_DBM`, AnchorFirmware/src/main.cpp). Mirrored
+  /// here only to show the user what they're aiming at; the anchor decides.
+  static const int dockThresholdDbm = -60;
+
+  /// True once Dock Register 0x01 has been written, i.e. the anchor is
+  /// measuring this link's RSSI.
+  ///
+  /// This happens as soon as the link opens, NOT when the user taps Start. The
+  /// anchor can only report an RSSI for a connection it has been told to
+  /// measure — an unregistered link reads back {docked:0, rssi:0}, which the
+  /// positioning meter rendered as -128 dBm. That made "Place the phone on the
+  /// dock" unwinnable: no matter how close the phone got, the meter sat at zero
+  /// and the copy stayed on "Closer — set it right on the anchor", because
+  /// nothing was being measured yet. §8.6 puts the meter at step 2 and the
+  /// register write at step 4; those two orderings are incompatible, and the
+  /// meter is the one users can see.
+  bool _measuring = false;
+
+  /// True once the user has started the window. Distinct from [_measuring]:
+  /// only a live window is worth chasing a dropped link for.
+  bool _windowLive = false;
 
   // ── Pre-session: connect + position (§8.6 steps 2–3) ─────────────────────
 
@@ -189,6 +208,17 @@ class DockSessionService extends ChangeNotifier {
       _connSub = device.connectionState.listen((s) {
         if (s == fbp.BluetoothConnectionState.disconnected) _onDropped();
       });
+
+      // Register immediately so the anchor starts measuring this link — the
+      // positioning meter is meaningless until it does (see [_measuring]).
+      try {
+        await _dockRegisterChar!.write([0x01], withoutResponse: false);
+        _measuring = true;
+        DebugLogService()
+            .log('dock', 'registered for measurement', [0x01]);
+      } catch (_) {
+        return false;
+      }
       return true;
     } catch (_) {
       return false;
@@ -202,9 +232,13 @@ class DockSessionService extends ChangeNotifier {
       return false;
     }
     try {
-      await _dockRegisterChar!.write([0x01], withoutResponse: false);
-      DebugLogService().log('dock', 'registered as docking phone', [0x01]);
-      _registered = true;
+      // Already registered in _openLink(); re-assert only if that failed.
+      if (!_measuring) {
+        await _dockRegisterChar!.write([0x01], withoutResponse: false);
+        _measuring = true;
+      }
+      DebugLogService().log('dock', 'window started', [0x01]);
+      _windowLive = true;
 
       _windowEnd = _computeWindowEnd(_commitment!);
       await _persist();
@@ -252,7 +286,9 @@ class DockSessionService extends ChangeNotifier {
         _phase != DockPhase.reconnecting) {
       return;
     }
-    if (!_registered) {
+    // A drop during positioning is just a failed setup — the user is standing
+    // right there and can retry. Only a live window is chased.
+    if (!_windowLive) {
       _setPhase(DockPhase.linkLost);
       return;
     }
@@ -279,22 +315,18 @@ class DockSessionService extends ChangeNotifier {
     }
     _reconnectAttempts++;
 
+    _measuring = false;
     await _teardownLink(disconnect: true);
-    final ok = await _openLink();
-    if (ok) {
-      // The anchor drops its docking-phone handle on disconnect (§4.11), so a
-      // reconnect that doesn't re-register leaves the anchor reporting
-      // undocked forever with a perfectly healthy link.
-      try {
-        await _dockRegisterChar!.write([0x01], withoutResponse: false);
-        DebugLogService().log('dock', 're-registered after reconnect', [0x01]);
-        _reconnectAttempts = 0;
-        _startTicker();
-        _setPhase(DockPhase.active);
-        return;
-      } catch (_) {
-        await _teardownLink(disconnect: true);
-      }
+    // _openLink() re-writes Dock Register 0x01. That re-registration is not
+    // optional: the anchor drops its docking-phone handle on disconnect (§4.11),
+    // so a reconnect without it leaves the anchor reporting undocked forever
+    // over a perfectly healthy link.
+    if (await _openLink()) {
+      DebugLogService().log('dock', 're-registered after reconnect', [0x01]);
+      _reconnectAttempts = 0;
+      _startTicker();
+      _setPhase(DockPhase.active);
+      return;
     }
     _scheduleRetry();
     notifyListeners();
@@ -322,7 +354,8 @@ class DockSessionService extends ChangeNotifier {
         _phase == DockPhase.reconnecting;
     _lastDock = null;
     _windowEnd = null;
-    _registered = false;
+    _measuring = false;
+    _windowLive = false;
     _reconnectAttempts = 0;
     _anchorRemoteId = null;
     await _setWakelock(false);
@@ -458,8 +491,8 @@ class DockSessionService extends ChangeNotifier {
 
     if (await _openLink()) {
       try {
-        await _dockRegisterChar!.write([0x01], withoutResponse: false);
-        _registered = true;
+        // _openLink() already registered; this is the window state.
+        _windowLive = true;
         _reconnectAttempts = 0;
         await _setWakelock(true);
         _startTicker();
@@ -470,7 +503,7 @@ class DockSessionService extends ChangeNotifier {
     }
     // Couldn't get back on the dock: keep the session and chase it rather than
     // dropping the user into "nothing is running".
-    _registered = true;
+    _windowLive = true;
     _setPhase(DockPhase.reconnecting);
     _scheduleRetry();
     return true;

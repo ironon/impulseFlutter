@@ -262,6 +262,7 @@ class DockSessionScreen extends StatelessWidget {
               style: TextStyle(color: AppTheme.textGrey, fontSize: 13),
             ),
           ),
+        _rssiDiagnostics(context, session),
         const Spacer(),
         ElevatedButton(
           style: ElevatedButton.styleFrom(
@@ -373,6 +374,7 @@ class DockSessionScreen extends StatelessWidget {
             style: const TextStyle(color: AppTheme.textGrey, fontSize: 13),
           ),
         ),
+        _rssiDiagnostics(context, session),
         const Spacer(),
         const Text(
           'Keep this app open and the phone on its dock. A shaky link fails '
@@ -387,6 +389,81 @@ class DockSessionScreen extends StatelessWidget {
               style: TextStyle(color: AppTheme.textGrey)),
         ),
       ],
+    );
+  }
+
+  // ── Advanced-mode RSSI diagnostics (§2A.4: read-only telemetry) ────────────
+
+  /// Shows the actual decision variable — the anchor↔phone link RSSI — against
+  /// the threshold the anchor uses. "Closer" is not actionable feedback when
+  /// the phone is already touching the dock; a number and a target are.
+  ///
+  /// Read-only, so it ships in release Advanced mode (§2A.4 gates write tools,
+  /// not telemetry).
+  Widget _rssiDiagnostics(BuildContext context, DockSessionService session) {
+    if (!context.watch<AppState>().advancedMode) return const SizedBox.shrink();
+
+    final dock = session.lastDock;
+    const target = DockSessionService.dockThresholdDbm;
+    final rssi = dock?.rssi;
+    final margin = rssi == null ? null : rssi - target;
+
+    return Container(
+      margin: const EdgeInsets.only(top: 16),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: AppTheme.cardGrey,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: AppTheme.textGrey.withValues(alpha: 0.3)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text('Diagnostics (Advanced)',
+              style: TextStyle(
+                  color: AppTheme.textWhite,
+                  fontSize: 12,
+                  fontWeight: FontWeight.bold)),
+          const SizedBox(height: 8),
+          _diagRow('Link RSSI',
+              rssi == null ? 'no reading yet' : '$rssi dBm'),
+          _diagRow('Needs to be', '≥ $target dBm'),
+          _diagRow(
+            'Margin',
+            margin == null
+                ? '—'
+                : (margin >= 0 ? '+$margin dB (docked)' : '$margin dB short'),
+          ),
+          _diagRow('Anchor says', dock == null
+              ? '—'
+              : (dock.docked ? 'docked' : 'not docked')),
+          const SizedBox(height: 6),
+          const Text(
+            'RSSI is reported by the anchor for this phone\'s link. If it '
+            'stays short with the phone touching the dock, the threshold is '
+            'the thing to tune, not the placement.',
+            style: TextStyle(color: AppTheme.textGrey, fontSize: 11),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _diagRow(String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Text(label,
+              style: const TextStyle(color: AppTheme.textGrey, fontSize: 12)),
+          Text(value,
+              style: const TextStyle(
+                  color: AppTheme.textWhite,
+                  fontSize: 12,
+                  fontFamily: 'monospace')),
+        ],
+      ),
     );
   }
 
