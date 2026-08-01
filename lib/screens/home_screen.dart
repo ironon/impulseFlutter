@@ -39,6 +39,18 @@ class _HomeScreenState extends State<HomeScreen> {
       if (mounted) setState(() => _seenAnchors = anchors);
     });
     DockSessionService().addListener(_onDockChanged);
+    // A dock session that was running when the app died must be picked back up:
+    // the anchor drops its registered phone on disconnect (§4.11) and the watch
+    // reads "no registered phone" as undocked, i.e. as the user holding it. An
+    // app crash should not read as a broken commitment.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      DockSessionService().tryRestore((id) {
+        for (final a in _autoService.getAutomationsForDate(DateTime.now())) {
+          if (a.id == id) return a;
+        }
+        return null;
+      });
+    });
   }
 
   void _onDockChanged() {
@@ -167,6 +179,7 @@ class _HomeScreenState extends State<HomeScreen> {
     if (target == null && session.phase == DockPhase.idle) return const [];
 
     final sessionLive = session.phase == DockPhase.active ||
+        session.phase == DockPhase.reconnecting ||
         session.phase == DockPhase.positioning;
     final commitment = session.commitment ?? target;
     if (commitment == null) return const [];

@@ -58,6 +58,11 @@ dependencies:
   flutter_local_notifications: ^22.0.1
   timezone: ^0.11.1
 
+  # Keeps the screen awake for the duration of a phone-docking session (§8.6).
+  # The dock link is only as reliable as the app staying foregrounded; letting
+  # the screen lock is the single most likely way a compliant user gets alarmed.
+  wakelock_plus: ^1.2.8
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

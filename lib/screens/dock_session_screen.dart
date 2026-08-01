@@ -56,6 +56,8 @@ class DockSessionScreen extends StatelessWidget {
         return _positioning(context, session);
       case DockPhase.active:
         return _monitor(context, session);
+      case DockPhase.reconnecting:
+        return _monitor(context, session);
       case DockPhase.ended:
         return _summary(
           context,
@@ -284,33 +286,47 @@ class DockSessionScreen extends StatelessWidget {
   // ── In-session monitor (§8.6 "during the window") ─────────────────────────
 
   Widget _monitor(BuildContext context, DockSessionService session) {
-    final docked = session.docked;
+    final reconnecting = session.phase == DockPhase.reconnecting;
+    final docked = session.docked && !reconnecting;
     final rem = session.remaining;
     final h = rem.inHours;
     final m = rem.inMinutes % 60;
+
+    // Three honest states, not two: docked, phone-in-hand, and "we can't see
+    // the dock right now". Collapsing the third into the second would tell a
+    // user who did nothing wrong that they picked their phone up.
+    final Color tint = reconnecting
+        ? Colors.blueGrey
+        : (docked ? Colors.green : Colors.amber);
+    final IconData icon = reconnecting
+        ? Icons.sync_problem
+        : (docked ? Icons.task_alt : Icons.smartphone);
+    final String headline = reconnecting
+        ? 'Lost the dock link — reconnecting'
+        : (docked
+            ? 'Phone-free block running — phone docked'
+            : 'Your phone left the dock');
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Card(
-          color: docked
-              ? Colors.green.withValues(alpha: 0.12)
-              : Colors.amber.withValues(alpha: 0.12),
+          color: tint.withValues(alpha: 0.12),
           child: Padding(
             padding: const EdgeInsets.all(16),
             child: Row(
               children: [
                 Icon(
-                  docked ? Icons.task_alt : Icons.smartphone,
-                  color: docked ? Colors.lightGreen : Colors.amber,
+                  icon,
+                  color: reconnecting
+                      ? Colors.blueGrey.shade200
+                      : (docked ? Colors.lightGreen : Colors.amber),
                   size: 30,
                 ),
                 const SizedBox(width: 12),
                 Expanded(
                   child: Text(
-                    docked
-                        ? 'Phone-free block running — phone docked'
-                        : 'Your phone left the dock',
+                    headline,
                     style: const TextStyle(
                         color: AppTheme.textWhite,
                         fontSize: 15,
@@ -321,6 +337,17 @@ class DockSessionScreen extends StatelessWidget {
             ),
           ),
         ),
+        if (reconnecting)
+          Padding(
+            padding: const EdgeInsets.only(top: 8),
+            child: Text(
+              session.reconnectAttempts <= 1
+                  ? 'Trying to get back on the dock…'
+                  : 'Still trying (attempt ${session.reconnectAttempts}). '
+                      'The block can\'t see the phone until this is back.',
+              style: const TextStyle(color: AppTheme.textGrey, fontSize: 12),
+            ),
+          ),
         const SizedBox(height: 20),
         Center(
           child: Text(
@@ -334,10 +361,14 @@ class DockSessionScreen extends StatelessWidget {
         const SizedBox(height: 8),
         Center(
           child: Text(
-            docked
-                ? 'Leave it be. The time is yours now.'
-                : 'Picking it up counts as having it — that\'s just honest. '
-                    'Set it back down whenever you\'re ready.',
+            reconnecting
+                ? 'Nothing is alarming — a link this app can\'t see fails '
+                    'open. Keep the phone on the dock and this should come '
+                    'back on its own.'
+                : (docked
+                    ? 'Leave it be. The time is yours now.'
+                    : 'Picking it up counts as having it — that\'s just '
+                        'honest. Set it back down whenever you\'re ready.'),
             textAlign: TextAlign.center,
             style: const TextStyle(color: AppTheme.textGrey, fontSize: 13),
           ),

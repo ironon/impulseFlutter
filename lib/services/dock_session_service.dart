@@ -2,11 +2,14 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart' as fbp;
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 
 import '../models/automation_model.dart';
 import '../utils/ble_constants.dart';
 import 'anchor_telemetry_service.dart';
 import 'debug_log_service.dart';
+import 'watch_service.dart';
 
 /// Where a docking session is in its life (§8.6).
 enum DockPhase {
@@ -23,11 +26,17 @@ enum DockPhase {
   /// window is running.
   active,
 
+  /// The link dropped mid-window and we are trying to get it back. Distinct
+  /// from [linkLost]: the session is still ours, the window is still running,
+  /// and no user action is needed yet.
+  reconnecting,
+
   /// The window finished (or the user released); unregistered cleanly.
   ended,
 
-  /// The link failed. Phone-distance fails OPEN — the watch won't alarm on a
-  /// bad link; the honest state is "the system can't see the phone".
+  /// The link failed and could not be recovered. Phone-distance fails OPEN —
+  /// the watch won't alarm on a bad link; the honest state is "the system can't
+  /// see the phone".
   linkLost,
 }
 
@@ -46,6 +55,21 @@ class DockSessionService extends ChangeNotifier {
   factory DockSessionService() => _instance;
   DockSessionService._internal();
 
+  static const _prefsKey = 'dock_session_v1';
+
+  /// Backoff schedule for reconnect attempts after a mid-window drop. Short at
+  /// first (most drops are transient — the phone shifted on the dock), then
+  /// easing off so a genuinely absent anchor doesn't burn the battery.
+  static const List<Duration> _backoff = [
+    Duration(seconds: 2),
+    Duration(seconds: 2),
+    Duration(seconds: 5),
+    Duration(seconds: 5),
+    Duration(seconds: 10),
+    Duration(seconds: 15),
+    Duration(seconds: 30),
+  ];
+
   DockPhase _phase = DockPhase.idle;
   DockPhase get phase => _phase;
 
@@ -58,6 +82,11 @@ class DockSessionService extends ChangeNotifier {
   DateTime? _windowEnd;
   DateTime? get windowEnd => _windowEnd;
 
+  /// How many consecutive reconnect attempts have failed. Surfaced so the UI
+  /// can be honest that the block isn't currently holding.
+  int _reconnectAttempts = 0;
+  int get reconnectAttempts => _reconnectAttempts;
+
   Duration get remaining => _windowEnd == null
       ? Duration.zero
       : _windowEnd!.difference(DateTime.now()).isNegative
@@ -65,13 +94,23 @@ class DockSessionService extends ChangeNotifier {
           : _windowEnd!.difference(DateTime.now());
 
   fbp.BluetoothDevice? _device;
+  String? _anchorRemoteId;
   fbp.BluetoothCharacteristic? _dockRegisterChar;
   fbp.BluetoothCharacteristic? _dockStatusChar;
   StreamSubscription<List<int>>? _dockSub;
   StreamSubscription<fbp.BluetoothConnectionState>? _connSub;
   Timer? _ticker;
+  Timer? _retryTimer;
+
+  /// The watch link we stood down for the duration of this session, so it can
+  /// be restored afterwards. See [_releaseWatchLink].
+  fbp.BluetoothDevice? _standDownWatch;
 
   bool get docked => _lastDock?.docked ?? false;
+
+  /// True once Dock Register has been written for this session — i.e. the
+  /// window is live and a dropped link must be chased, not shrugged off.
+  bool _registered = false;
 
   // ── Pre-session: connect + position (§8.6 steps 2–3) ─────────────────────
 
@@ -81,13 +120,40 @@ class DockSessionService extends ChangeNotifier {
       Automation commitment, String bleRemoteId) async {
     await endSession(notify: false);
     _commitment = commitment;
+    _anchorRemoteId = bleRemoteId;
     _setPhase(DockPhase.connecting);
 
+    // The watch must not be holding a peripheral link to this phone while it
+    // central-connects to the anchor for its proximity polls: concurrent
+    // peripheral+central is the documented NimBLE ble_hs_timer_exp crash
+    // (firmware_spec_v2.md §10.1, tests/version_bump.md §6), and a phoneAway
+    // window makes the watch do exactly that every poll. Calibration already
+    // serialises the two roles this way ("Option A"); a dock session needs the
+    // same courtesy. The link is restored in endSession().
+    await _releaseWatchLink();
+
+    final ok = await _openLink();
+    if (!ok) {
+      await _teardownLink();
+      _setPhase(DockPhase.linkLost);
+      return false;
+    }
+    _setPhase(DockPhase.positioning);
+    return true;
+  }
+
+  /// Opens the anchor link and wires up Dock Status. Shared by the initial
+  /// connect and every reconnect attempt.
+  Future<bool> _openLink() async {
+    final id = _anchorRemoteId;
+    if (id == null) return false;
     try {
-      final device = fbp.BluetoothDevice.fromId(bleRemoteId);
+      final device = fbp.BluetoothDevice.fromId(id);
       await device.connect(timeout: const Duration(seconds: 10));
       _device = device;
 
+      _dockRegisterChar = null;
+      _dockStatusChar = null;
       final services = await device.discoverServices();
       for (final svc in services) {
         if (svc.serviceUuid.str.toLowerCase() !=
@@ -104,11 +170,7 @@ class DockSessionService extends ChangeNotifier {
           }
         }
       }
-      if (_dockRegisterChar == null || _dockStatusChar == null) {
-        await endSession(notify: false);
-        _setPhase(DockPhase.linkLost);
-        return false;
-      }
+      if (_dockRegisterChar == null || _dockStatusChar == null) return false;
 
       await _dockStatusChar!.setNotifyValue(true);
       _dockSub = _dockStatusChar!.onValueReceived.listen((bytes) {
@@ -124,20 +186,11 @@ class DockSessionService extends ChangeNotifier {
         }
       } catch (_) {}
 
-      // Fail-open on drops: report honestly, never pretend the link is fine.
       _connSub = device.connectionState.listen((s) {
-        if (s == fbp.BluetoothConnectionState.disconnected &&
-            (_phase == DockPhase.active ||
-                _phase == DockPhase.positioning)) {
-          _setPhase(DockPhase.linkLost);
-        }
+        if (s == fbp.BluetoothConnectionState.disconnected) _onDropped();
       });
-
-      _setPhase(DockPhase.positioning);
       return true;
     } catch (_) {
-      await endSession(notify: false);
-      _setPhase(DockPhase.linkLost);
       return false;
     }
   }
@@ -151,29 +204,100 @@ class DockSessionService extends ChangeNotifier {
     try {
       await _dockRegisterChar!.write([0x01], withoutResponse: false);
       DebugLogService().log('dock', 'registered as docking phone', [0x01]);
+      _registered = true;
 
-      final c = _commitment!;
-      final now = DateTime.now();
-      _windowEnd = DateTime(now.year, now.month, now.day)
-          .add(Duration(minutes: c.endMinutes));
-      if (_windowEnd!.isBefore(now)) {
-        // Window belongs to tomorrow (docked ahead of time near midnight).
-        _windowEnd = _windowEnd!.add(const Duration(days: 1));
-      }
-
-      _ticker = Timer.periodic(const Duration(seconds: 10), (_) {
-        if (remaining == Duration.zero) {
-          endSession();
-        } else {
-          notifyListeners(); // countdown tick
-        }
-      });
+      _windowEnd = _computeWindowEnd(_commitment!);
+      await _persist();
+      await _setWakelock(true);
+      _startTicker();
       _setPhase(DockPhase.active);
       return true;
     } catch (_) {
       _setPhase(DockPhase.linkLost);
       return false;
     }
+  }
+
+  DateTime _computeWindowEnd(Automation c) {
+    final now = DateTime.now();
+    var end = DateTime(now.year, now.month, now.day)
+        .add(Duration(minutes: c.endMinutes));
+    if (end.isBefore(now)) {
+      // Window belongs to tomorrow (docked ahead of time near midnight).
+      end = end.add(const Duration(days: 1));
+    }
+    return end;
+  }
+
+  void _startTicker() {
+    _ticker?.cancel();
+    _ticker = Timer.periodic(const Duration(seconds: 10), (_) {
+      if (remaining == Duration.zero) {
+        endSession();
+      } else {
+        notifyListeners(); // countdown tick
+      }
+    });
+  }
+
+  // ── Link loss + recovery ─────────────────────────────────────────────────
+
+  /// Called whenever the anchor link drops. Before Dock Register is written
+  /// this is just a failed setup; after it, the window is running and the link
+  /// is worth chasing — the watch reads a missing phone as "undocked", which
+  /// is the alarming direction, so silent give-up is the wrong default.
+  void _onDropped() {
+    if (_phase != DockPhase.active &&
+        _phase != DockPhase.positioning &&
+        _phase != DockPhase.reconnecting) {
+      return;
+    }
+    if (!_registered) {
+      _setPhase(DockPhase.linkLost);
+      return;
+    }
+    if (remaining == Duration.zero) {
+      endSession();
+      return;
+    }
+    _setPhase(DockPhase.reconnecting);
+    _scheduleRetry();
+  }
+
+  void _scheduleRetry() {
+    _retryTimer?.cancel();
+    final d = _backoff[
+        _reconnectAttempts < _backoff.length ? _reconnectAttempts : _backoff.length - 1];
+    _retryTimer = Timer(d, _attemptReconnect);
+  }
+
+  Future<void> _attemptReconnect() async {
+    if (_phase != DockPhase.reconnecting) return;
+    if (remaining == Duration.zero) {
+      await endSession();
+      return;
+    }
+    _reconnectAttempts++;
+
+    await _teardownLink(disconnect: true);
+    final ok = await _openLink();
+    if (ok) {
+      // The anchor drops its docking-phone handle on disconnect (§4.11), so a
+      // reconnect that doesn't re-register leaves the anchor reporting
+      // undocked forever with a perfectly healthy link.
+      try {
+        await _dockRegisterChar!.write([0x01], withoutResponse: false);
+        DebugLogService().log('dock', 're-registered after reconnect', [0x01]);
+        _reconnectAttempts = 0;
+        _startTicker();
+        _setPhase(DockPhase.active);
+        return;
+      } catch (_) {
+        await _teardownLink(disconnect: true);
+      }
+    }
+    _scheduleRetry();
+    notifyListeners();
   }
 
   // ── End of window / release (§8.6 end) ───────────────────────────────────
@@ -184,25 +308,27 @@ class DockSessionService extends ChangeNotifier {
   Future<void> endSession({bool notify = true}) async {
     _ticker?.cancel();
     _ticker = null;
+    _retryTimer?.cancel();
+    _retryTimer = null;
     try {
       if (_dockRegisterChar != null && (_device?.isConnected ?? false)) {
         await _dockRegisterChar!.write([0x00], withoutResponse: false);
         DebugLogService().log('dock', 'unregistered', [0x00]);
       }
     } catch (_) {}
-    await _dockSub?.cancel();
-    await _connSub?.cancel();
-    _dockSub = null;
-    _connSub = null;
-    try {
-      await _device?.disconnect();
-    } catch (_) {}
-    _device = null;
-    _dockRegisterChar = null;
-    _dockStatusChar = null;
+    await _teardownLink(disconnect: true);
+
+    final hadSession = _phase == DockPhase.active ||
+        _phase == DockPhase.reconnecting;
     _lastDock = null;
-    final hadSession = _phase == DockPhase.active;
     _windowEnd = null;
+    _registered = false;
+    _reconnectAttempts = 0;
+    _anchorRemoteId = null;
+    await _setWakelock(false);
+    await _clearPersisted();
+    await _restoreWatchLink();
+
     if (notify) {
       _phase = hadSession ? DockPhase.ended : DockPhase.idle;
       notifyListeners();
@@ -211,12 +337,143 @@ class DockSessionService extends ChangeNotifier {
     }
   }
 
+  /// Drops the BLE resources without touching session state, so a reconnect
+  /// can rebuild them.
+  Future<void> _teardownLink({bool disconnect = false}) async {
+    await _dockSub?.cancel();
+    await _connSub?.cancel();
+    _dockSub = null;
+    _connSub = null;
+    if (disconnect) {
+      try {
+        await _device?.disconnect();
+      } catch (_) {}
+    }
+    _device = null;
+    _dockRegisterChar = null;
+    _dockStatusChar = null;
+  }
+
   /// Back to idle after the "ended"/"linkLost" summary is acknowledged.
   void dismiss() {
     if (_phase == DockPhase.ended || _phase == DockPhase.linkLost) {
       _commitment = null;
       _setPhase(DockPhase.idle);
     }
+  }
+
+  // ── Watch-link stand-down (dual-role crash avoidance) ────────────────────
+
+  Future<void> _releaseWatchLink() async {
+    final ws = WatchService();
+    if (!ws.isConnected) return;
+    _standDownWatch = ws.device;
+    DebugLogService()
+        .log('dock', 'standing down watch link for dock session', const []);
+    try {
+      await ws.disconnect();
+    } catch (_) {}
+  }
+
+  Future<void> _restoreWatchLink() async {
+    final d = _standDownWatch;
+    _standDownWatch = null;
+    if (d == null) return;
+    try {
+      await WatchService().connect(d);
+      DebugLogService().log('dock', 'watch link restored', const []);
+    } catch (_) {
+      // Not fatal: the connection screen reconnects on its own.
+    }
+  }
+
+  // ── Screen wakelock ──────────────────────────────────────────────────────
+
+  Future<void> _setWakelock(bool on) async {
+    try {
+      await WakelockPlus.toggle(enable: on);
+    } catch (_) {
+      // Unsupported platform (e.g. tests) — the session still runs, it just
+      // depends on the user keeping the screen alive.
+    }
+  }
+
+  // ── Persistence across an app restart ────────────────────────────────────
+
+  Future<void> _persist() async {
+    final c = _commitment;
+    final id = _anchorRemoteId;
+    final end = _windowEnd;
+    if (c == null || id == null || end == null) return;
+    try {
+      final p = await SharedPreferences.getInstance();
+      await p.setStringList(_prefsKey, [
+        c.id,
+        id,
+        end.millisecondsSinceEpoch.toString(),
+      ]);
+    } catch (_) {}
+  }
+
+  Future<void> _clearPersisted() async {
+    try {
+      final p = await SharedPreferences.getInstance();
+      await p.remove(_prefsKey);
+    } catch (_) {}
+  }
+
+  /// Re-establish a session that was running when the app died. Returns true if
+  /// a session was resumed. [lookup] resolves the stored commitment id.
+  ///
+  /// Without this, an app restart mid-window leaves the anchor with no
+  /// registered phone — which the watch reads as "undocked", i.e. as the user
+  /// having picked the phone up. Losing the app should not look like cheating.
+  Future<bool> tryRestore(Automation? Function(String id) lookup) async {
+    if (_phase != DockPhase.idle) return false;
+    List<String>? saved;
+    try {
+      final p = await SharedPreferences.getInstance();
+      saved = p.getStringList(_prefsKey);
+    } catch (_) {
+      return false;
+    }
+    if (saved == null || saved.length < 3) return false;
+
+    final end = DateTime.fromMillisecondsSinceEpoch(int.tryParse(saved[2]) ?? 0);
+    if (!end.isAfter(DateTime.now())) {
+      await _clearPersisted();
+      return false;
+    }
+    final commitment = lookup(saved[0]);
+    if (commitment == null) {
+      await _clearPersisted();
+      return false;
+    }
+
+    _commitment = commitment;
+    _anchorRemoteId = saved[1];
+    _windowEnd = end;
+    _setPhase(DockPhase.connecting);
+    await _releaseWatchLink();
+
+    if (await _openLink()) {
+      try {
+        await _dockRegisterChar!.write([0x01], withoutResponse: false);
+        _registered = true;
+        _reconnectAttempts = 0;
+        await _setWakelock(true);
+        _startTicker();
+        _setPhase(DockPhase.active);
+        DebugLogService().log('dock', 'session restored after restart', [0x01]);
+        return true;
+      } catch (_) {}
+    }
+    // Couldn't get back on the dock: keep the session and chase it rather than
+    // dropping the user into "nothing is running".
+    _registered = true;
+    _setPhase(DockPhase.reconnecting);
+    _scheduleRetry();
+    return true;
   }
 
   void _setPhase(DockPhase p) {
