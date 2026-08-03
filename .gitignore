@@ -46,3 +46,71 @@ app.*.map.json
 
 # Editor / tooling
 .vscode/
+
+# ---------------------------------------------------------------------------
+# Xcode dependency integration — DO NOT REMOVE without reading this.
+#
+# The iOS/macOS dependency install (CocoaPods / SPM) is configured on a
+# separate machine. This repo's copies of the files below are the pristine,
+# plugin-free state: no Pods references in the pbxproj, no Pods xcconfig
+# includes, no Pods.xcodeproj in the workspace. Tracking them means a pull
+# would revert a working install and force a full dependency reinstall.
+#
+# `pod install` rewrites every file in this section. They are deliberately
+# untracked; each machine keeps its own. Native source (AppDelegate.swift,
+# Info.plist, entitlements, assets, schemes) stays tracked and still syncs.
+# ---------------------------------------------------------------------------
+
+# Xcode project files rewritten by `pod install` / SPM resolution
+/ios/Runner.xcodeproj/project.pbxproj
+/macos/Runner.xcodeproj/project.pbxproj
+
+# Workspaces — pod install adds the Pods.xcodeproj FileRef here
+/ios/Runner.xcworkspace/contents.xcworkspacedata
+/ios/Runner.xcodeproj/project.xcworkspace/contents.xcworkspacedata
+/macos/Runner.xcworkspace/contents.xcworkspacedata
+/macos/Runner.xcodeproj/project.xcworkspace/contents.xcworkspacedata
+
+# Build configs — pod install prepends the Pods-Runner xcconfig #include
+/ios/Flutter/Debug.xcconfig
+/ios/Flutter/Release.xcconfig
+/macos/Flutter/Flutter-Debug.xcconfig
+/macos/Flutter/Flutter-Release.xcconfig
+/macos/Runner/Configs/Debug.xcconfig
+/macos/Runner/Configs/Release.xcconfig
+
+# Per-machine Xcode workspace state
+**/*.xcworkspace/xcshareddata/WorkspaceSettings.xcsettings
+**/*.xcworkspace/xcshareddata/IDEWorkspaceChecks.plist
+
+# CocoaPods
+**/Pods/
+**/Podfile
+**/Podfile.lock
+**/.symlinks/
+
+# Swift Package Manager
+**/*.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/
+**/Package.resolved
+**/.swiftpm/
+
+# Flutter-generated native glue
+**/Flutter/Generated.xcconfig
+**/Flutter/flutter_export_environment.sh
+**/Flutter/ephemeral/
+**/Flutter/App.framework
+**/Flutter/Flutter.framework
+**/Flutter/Flutter.podspec
+/ios/Runner/GeneratedPluginRegistrant.h
+/ios/Runner/GeneratedPluginRegistrant.m
+/macos/Flutter/GeneratedPluginRegistrant.swift
+
+# Xcode build/user state
+**/DerivedData/
+**/xcuserdata/
+**/*.xcuserdatad/
+**/build/
+**/*.moved-aside
+**/*.pbxuser
+**/dgph
+**/.last_build_id
