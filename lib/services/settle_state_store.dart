@@ -27,6 +27,13 @@ class SettleStateStore {
     });
   }
 
+  /// Drop all per-event settle state (factory reset).
+  Future<void> clearAll() async {
+    _entries.clear();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_key);
+  }
+
   Future<void> _save() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(

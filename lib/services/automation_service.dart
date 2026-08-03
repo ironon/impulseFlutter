@@ -14,6 +14,17 @@ class AutomationService {
 
   Future<void> initialize() async => _loadAutomations();
 
+  /// Drop every stored automation and the in-memory list (factory reset).
+  ///
+  /// Explicit rather than "wipe prefs then re-initialize": _loadAutomations()
+  /// only assigns when the key is present, so re-initializing after a prefs
+  /// clear would leave the previous list sitting in memory.
+  Future<void> clearAll() async {
+    _automations = [];
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_automationsKey);
+  }
+
   Future<void> _loadAutomations() async {
     final prefs = await SharedPreferences.getInstance();
     final String? json = prefs.getString(_automationsKey);

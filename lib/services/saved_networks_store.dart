@@ -107,4 +107,26 @@ class SavedNetworksStore {
     await _secure.delete(key: _pwKeyPrefix + ssid);
     await _persistOrder();
   }
+
+  /// Forget every saved network and its stored password (factory reset).
+  ///
+  /// Deletes each password key individually rather than calling the secure
+  /// store's deleteAll(): that would clear the whole Keychain/Keystore
+  /// namespace, including anything another part of the app stores there now or
+  /// later. This removes exactly what this store wrote.
+  ///
+  /// Carries the same honest limit as [remove] — credentials a watch or anchor
+  /// has already saved to its own NVS stay there; nothing here can reach them.
+  ///
+  /// Resets [_loaded] so a later load() actually re-reads instead of
+  /// short-circuiting on the stale flag.
+  Future<void> clearAll() async {
+    for (final n in _networks) {
+      await _secure.delete(key: _pwKeyPrefix + n.ssid);
+    }
+    _networks = [];
+    _loaded = false;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_ssidsKey);
+  }
 }

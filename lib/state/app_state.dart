@@ -16,6 +16,7 @@ import '../services/anchor_service.dart';
 import '../services/automation_service.dart';
 import '../services/bluetooth_service.dart';
 import '../services/commitment_policy_service.dart';
+import '../services/factory_reset_service.dart';
 import '../services/integrity_store.dart';
 import '../services/notification_service.dart';
 import '../services/saved_networks_store.dart';
@@ -280,6 +281,52 @@ class AppState extends ChangeNotifier {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool('onboarding_done', true);
     notifyListeners();
+  }
+
+  // ── Factory reset (advanced mode only) ────────────────────────────────────
+
+  /// Erase all app data and return to a first-launch state.
+  ///
+  /// Scope is the APP. The watch keeps its schedule, pass ledger and pairing,
+  /// and keeps enforcing them; anchors keep theirs. See FactoryResetService —
+  /// the caller is responsible for saying so before asking to proceed.
+  ///
+  /// Returns the list of steps that failed, empty on a clean wipe.
+  Future<List<String>> factoryReset() async {
+    final failures = await FactoryResetService(
+      integrity: _integrity,
+      settleStore: settleStore,
+      syncStore: syncStore,
+      savedNetworks: savedNetworks,
+      watchService: _watch,
+      automationService: _automations,
+    ).run();
+
+    // Return this object to its constructed state. Done by assignment rather
+    // than by re-running initialize(): initialize() re-reads prefs (now empty,
+    // so it would land on the same defaults) but also re-subscribes streams and
+    // re-arms notifications, which would leak the existing subscriptions and
+    // re-schedule notices for a schedule that no longer exists.
+    _mode = AppMode.normal;
+    _advancedIntroSeen = false;
+    _onboardingDone = false;
+    _drafts = [];
+    _status = null;
+    _pendingRows = const [];
+    _watchPendingEntries = null;
+    _effectiveScheduleCrc = null;
+    _syncingDevices.clear();
+    emptyNetworksWarningDismissed = false;
+
+    // Fresh policy on library defaults — restore() with no arguments is a no-op
+    // by design, so a new instance is what actually drops the stored values.
+    _policy = CommitmentPolicyService(
+      integrity: _integrity,
+      settleStore: settleStore,
+    );
+
+    notifyListeners();
+    return failures;
   }
 
   Future<void> _persistPolicyValues() async {

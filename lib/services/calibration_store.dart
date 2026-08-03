@@ -27,6 +27,15 @@ class CalibrationStore {
     });
   }
 
+  /// Drop every cached anchor calibration record (factory reset). Note this
+  /// only clears the APP's cache — the authoritative threshold still lives in
+  /// each anchor's own NVS fingerprint blob and is untouched.
+  Future<void> clearAll() async {
+    _entries.clear();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_key);
+  }
+
   Future<void> _save() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(

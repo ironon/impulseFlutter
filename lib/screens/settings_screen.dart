@@ -372,10 +372,175 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ),
             ),
 
+          // ── Danger zone (advanced mode only, §2A.3) ────────────────────
+          // Gated on advanced mode because this is the one control that can
+          // undo weeks of self-binding in a single tap. Normal mode never
+          // renders it at all.
+          if (context.watch<AppState>().advancedMode) ...[
+            const SizedBox(height: 24),
+            _section('Danger Zone'),
+            _buildResetCard(),
+          ],
+
           const SizedBox(height: 32),
         ],
       ),
     );
+  }
+
+  // ── Factory reset ─────────────────────────────────────────────────────────
+
+  Widget _buildResetCard() => Card(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('Reset app',
+                  style: TextStyle(color: AppTheme.textWhite, fontSize: 14)),
+              const SizedBox(height: 4),
+              const Text(
+                'Erase everything this app has stored and start over as if it '
+                'were newly installed. Your watch and anchors keep their own '
+                'settings.',
+                style: TextStyle(color: AppTheme.textGrey, fontSize: 12),
+              ),
+              const SizedBox(height: 12),
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton.icon(
+                  onPressed: _isBusy ? null : _confirmFactoryReset,
+                  icon: const Icon(Icons.delete_forever_outlined, size: 18),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: Colors.redAccent,
+                    side: const BorderSide(color: Colors.redAccent),
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                  ),
+                  label: const Text('Erase all app data',
+                      style: TextStyle(fontWeight: FontWeight.bold)),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+
+  Future<void> _confirmFactoryReset() async {
+    // Resolved before the dialog's await, so the reset does not reach back
+    // through a BuildContext across an async gap.
+    final app = context.read<AppState>();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppTheme.darkGrey,
+        title: const Text('Erase all app data?',
+            style: TextStyle(color: AppTheme.textWhite, fontSize: 18)),
+        content: const SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'This deletes, permanently:',
+                style: TextStyle(color: AppTheme.textGrey, fontSize: 13),
+              ),
+              SizedBox(height: 8),
+              Text(
+                '•  Every commitment and draft\n'
+                '•  Your emergency-pass history and remaining allowance\n'
+                '•  Pending changes still waiting out their delay\n'
+                '•  The audit trail\n'
+                '•  Saved WiFi networks and their passwords\n'
+                '•  Paired watch and anchors, and their calibration',
+                style: TextStyle(color: AppTheme.textWhite, fontSize: 13),
+              ),
+              SizedBox(height: 12),
+              // The honest part. Without this the feature is a trap: the user
+              // most likely to press it is the one who wants the enforcement to
+              // stop, and this does not stop the enforcement.
+              Text(
+                'It does not reset your watch. The watch holds its own copy of '
+                'your schedule and keeps enforcing it — this app will simply no '
+                'longer recognise it. Anchors likewise keep their own settings.',
+                style: TextStyle(color: Colors.amberAccent, fontSize: 13),
+              ),
+              SizedBox(height: 12),
+              Text(
+                'There is no undo, and nothing about this waits out a delay.',
+                style: TextStyle(color: AppTheme.textGrey, fontSize: 13),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel',
+                style: TextStyle(color: AppTheme.textGrey)),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.redAccent,
+              foregroundColor: Colors.white,
+            ),
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Erase everything'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+
+    _busy(true);
+    final failures = await app.factoryReset();
+    if (!mounted) return;
+
+    // Local screen state mirrors what was just erased, so re-seed it to the
+    // same defaults _loadPrefs() would now read rather than leaving the old
+    // values on screen looking like they survived.
+    setState(() {
+      _disconnectedIsDormant = true;
+      _awayIsDormant = true;
+      _tzOffsetMin = 0;
+      for (final c in _ipCtrls.values) {
+        c.dispose();
+      }
+      _ipCtrls.clear();
+    });
+
+    _busy(false);
+
+    // No success message on the happy path, and nothing to navigate: onboarding
+    // is now unfinished, so the app shell swaps itself for OnboardingFlow on the
+    // next frame. That IS the confirmation, and it is a clearer one than a
+    // banner on a screen the user is about to leave.
+    //
+    // Failures are the case that needs saying out loud, and a banner here would
+    // be destroyed by that same swap — so they go in a dialog, which the root
+    // overlay keeps alive across it.
+    if (failures.isNotEmpty && mounted) {
+      await showDialog<void>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: AppTheme.darkGrey,
+          title: const Text('Erased, with exceptions',
+              style: TextStyle(color: AppTheme.textWhite, fontSize: 18)),
+          content: Text(
+            'Everything else was erased, but these did not complete:\n\n'
+            '${failures.map((f) => '•  $f').join('\n')}\n\n'
+            'Try again, or reinstall the app if it keeps failing.',
+            style: const TextStyle(color: AppTheme.textGrey, fontSize: 13),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(),
+              child: const Text('OK',
+                  style: TextStyle(color: AppTheme.lightOrange)),
+            ),
+          ],
+        ),
+      );
+    }
   }
 
   // ── Widget helpers ────────────────────────────────────────────────────────

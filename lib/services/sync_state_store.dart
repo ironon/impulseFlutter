@@ -52,6 +52,21 @@ class SyncStateStore {
             .map((k, v) => MapEntry(k, v as int));
   }
 
+  /// Drop all revision tracking, current and per-device (factory reset).
+  ///
+  /// Safe by construction: with everything absent every class reads "behind",
+  /// so the app re-pushes and converges rather than assuming devices are in
+  /// sync. Same pessimism as a fresh install.
+  Future<void> clearAll(Iterable<String> deviceIds) async {
+    _current = {};
+    _acked.clear();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_currentKey);
+    for (final id in deviceIds) {
+      await prefs.remove(_ackedKey(id));
+    }
+  }
+
   Future<void> _persistCurrent() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_currentKey, jsonEncode(_current));

@@ -44,6 +44,15 @@ class AnchorDistributionService {
     return _lastSuccess = map;
   }
 
+  /// Forget when each anchor was last successfully pushed to (factory reset).
+  /// Nulls the cache as well as the key, so the next read re-loads from empty
+  /// rather than serving the pre-reset map.
+  Future<void> clearAll() async {
+    _lastSuccess = null;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_prefsKey);
+  }
+
   Future<void> _saveLastSuccess() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setStringList(

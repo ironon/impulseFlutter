@@ -247,6 +247,22 @@ class IntegrityStore {
         now: now ?? DateTime.now(),
       );
 
+  /// Destroy the pending queue, the pass ledger and the audit trail (factory
+  /// reset). One transaction, so a reset cannot half-happen and leave an audit
+  /// trail describing spends whose ledger rows are gone.
+  ///
+  /// This is the one operation in this class that is not self-binding-safe by
+  /// construction: it erases the record of quarantined loosenings and spent
+  /// passes rather than aging them out. That is deliberate and gated — see
+  /// FactoryResetService, which is the only caller.
+  Future<void> wipeAll() {
+    return _db.transaction(() async {
+      await _db.delete(_db.pendingChanges).go();
+      await _db.delete(_db.emergencyPassSpends).go();
+      await _db.delete(_db.auditTrail).go();
+    });
+  }
+
   Future<List<AuditEntryRow>> auditEntries({int limit = 200}) {
     return (_db.select(_db.auditTrail)
           ..orderBy([

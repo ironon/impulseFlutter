@@ -26,6 +26,15 @@ class BluetoothService {
     await _loadDeviceHistory();
   }
 
+  /// Forget every known watch and anchor (factory reset). Explicit for the same
+  /// reason as AutomationService.clearAll(): _loadDeviceHistory() only assigns
+  /// when the key exists, so a reload after a prefs clear keeps the old list.
+  Future<void> clearAll() async {
+    _deviceHistory = [];
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_devicesKey);
+  }
+
   Future<void> _loadDeviceHistory() async {
     final prefs = await SharedPreferences.getInstance();
     final String? json = prefs.getString(_devicesKey);
