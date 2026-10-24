@@ -1,0 +1,68 @@
+# Builds an unsigned iOS app on a GitHub-hosted Mac and uploads it as a
+# downloadable .ipa. Signing happens on the receiving machine with
+# `xtool install Impulse.ipa`, which re-signs with the local Apple ID.
+#
+# The iOS project files are deliberately untracked (see .gitignore, "Xcode
+# dependency integration"), so this job regenerates them from the Flutter
+# template before building. Tracked native sources (Info.plist,
+# AppDelegate.swift, ...) are left alone: `flutter create` never overwrites
+# an existing file without --overwrite.
+#
+# Manual trigger only: macOS runner minutes bill at 10x on private repos.
+
+name: iOS build
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.41.4
+          channel: stable
+          cache: true
+
+      # Keep plugins on CocoaPods so the Podfile patch below applies to all
+      # of them; the Mac this project is normally built on uses CocoaPods too.
+      - name: Configure Flutter
+        run: flutter config --no-enable-swift-package-manager --no-analytics
+
+      - name: Regenerate untracked iOS project files
+        run: |
+          flutter pub get
+          flutter create --platforms=ios --org com.example --project-name impulse_app .
+          flutter build ios --config-only --release --no-codesign
+          test -f ios/Podfile || { echo "::error::flutter did not generate ios/Podfile"; exit 1; }
+
+      # permission_handler compiles every permission out unless its macro is
+      # set, and a compiled-out permission silently reports "denied".
+      - name: Patch Podfile (deployment target, permission_handler macros)
+        run: |
+          perl -0pi -e '
+            s/^# platform :ios, .*$/platform :ios, "13.0"/m;
+            s/(flutter_additional_ios_build_settings\(target\)\n)/$1    target.build_configurations.each do |config|\n      config.build_settings["GCC_PREPROCESSOR_DEFINITIONS"] ||= ["\$(inherited)", "PERMISSION_BLUETOOTH=1", "PERMISSION_NOTIFICATIONS=1"]\n    end\n/;
+          ' ios/Podfile
+          grep -q '^platform :ios' ios/Podfile && grep -q PERMISSION_BLUETOOTH ios/Podfile \
+            || { echo "::error::Podfile patch did not apply; template changed?"; cat ios/Podfile; exit 1; }
+          cd ios && pod install --repo-update
+
+      - name: Build
+        run: flutter build ios --release --no-codesign
+
+      - name: Package .ipa
+        run: |
+          mkdir Payload
+          cp -R build/ios/iphoneos/Runner.app Payload/
+          zip -qry Impulse.ipa Payload
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Impulse-ios-${{ github.sha }}
+          path: Impulse.ipa
+          retention-days: 14
