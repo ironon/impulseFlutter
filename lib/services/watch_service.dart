@@ -29,6 +29,7 @@
 //   …001A Pending Changes   read+notify     count + entries       _parsePendingChanges (probed)
 //   …001B Emergency Pass    write+read      3 opcodes             spend/allowance/ledger (probed)
 //   …001C Calibration Ctrl  write+notify    START/FINALIZE/ABORT  startCalibration etc. (probed)
+//   …001D Debug Telemetry   read+notify     §5.6 snapshot         readDebugTelemetry -> debugTelemetryStream (probed)
 //
 // "Probed" means the characteristic may be absent on a given firmware build:
 // callers must check the `has*Characteristic` getters first. Layout changes are
@@ -48,6 +49,7 @@ import 'package:flutter_blue_plus/flutter_blue_plus.dart' as fbp;
 
 import '../models/automation_model.dart';
 import '../models/bluetooth_device_model.dart';
+import '../models/debug_telemetry.dart';
 import '../utils/ble_constants.dart';
 import '../utils/schedule_encoder.dart';
 import 'debug_log_service.dart';
@@ -460,20 +462,29 @@ class WatchService {
   fbp.BluetoothCharacteristic? _pendingChar;
   fbp.BluetoothCharacteristic? _emergencyPassChar;
   fbp.BluetoothCharacteristic? _calibChar;
+  fbp.BluetoothCharacteristic? _debugChar;
 
   StreamSubscription<List<int>>? _statusSub;
   StreamSubscription<List<int>>? _seenAnchorsSub;
   StreamSubscription<List<int>>? _calibSub;
+  StreamSubscription<List<int>>? _debugSub;
+  bool _debugReadInFlight = false;
 
   final _statusController       = StreamController<WatchStatus>.broadcast();
   final _seenAnchorsController  = StreamController<List<SeenAnchorInfo>>.broadcast();
   final _calibController        = StreamController<CalibrationProgress>.broadcast();
+  final _debugController        = StreamController<WatchDebugTelemetry>.broadcast();
 
   Stream<WatchStatus>          get statusStream       => _statusController.stream;
   Stream<List<SeenAnchorInfo>> get seenAnchorsStream  => _seenAnchorsController.stream;
 
   /// Progress frames from an app-guided calibration burst (§4.10.7).
   Stream<CalibrationProgress>  get calibrationStream  => _calibController.stream;
+
+  /// Decoded Debug Telemetry snapshots (`…001D`, firmware §5.6). Notify is only
+  /// a change hint — the payload exceeds the MTU, so every notification
+  /// triggers a full read (see [_subscribeNotifications]).
+  Stream<WatchDebugTelemetry>  get debugTelemetryStream => _debugController.stream;
 
   bool get isConnected => _device != null &&
       (_device!.isConnected);
@@ -502,9 +513,11 @@ class WatchService {
     await _statusSub?.cancel();
     await _seenAnchorsSub?.cancel();
     await _calibSub?.cancel();
+    await _debugSub?.cancel();
     _statusSub = null;
     _seenAnchorsSub = null;
     _calibSub = null;
+    _debugSub = null;
     await _device?.disconnect();
     _device = null;
     _gattService = null;
@@ -523,6 +536,7 @@ class WatchService {
     _pendingChar     = null;
     _emergencyPassChar = null;
     _calibChar       = null;
+    _debugChar       = null;
   }
 
   // ── Runtime capability probes (§8.11, §9.5/§9.6) ──────────────────────────
@@ -533,6 +547,7 @@ class WatchService {
   bool get hasPendingChangesCharacteristic => _pendingChar != null;
   bool get hasEmergencyPassCharacteristic  => _emergencyPassChar != null;
   bool get hasCalibrationCharacteristic    => _calibChar != null;
+  bool get hasDebugTelemetryCharacteristic => _debugChar != null;
 
   /// Set the watch clock over BLE (§8.11): `[utc_epoch int64][tz_offset int16]`.
   /// Returns the response byte (0x01 ok; 0x02 rejected — would end the active
@@ -756,6 +771,39 @@ class WatchService {
     }
   }
 
+  // ── Debug Telemetry (§5.6) ────────────────────────────────────────────────
+
+  /// Read + decode the watch's Debug Telemetry snapshot (`…001D`).
+  ///
+  /// Returns null when the firmware does not expose the characteristic or the
+  /// read/decode fails, so the debug screen can say "not available" instead of
+  /// crashing. The payload is longer than a default-MTU notification: callers
+  /// must use a read (this method), never the notification bytes.
+  Future<WatchDebugTelemetry?> readDebugTelemetry() async {
+    final c = _debugChar;
+    if (c == null) return null;
+    try {
+      final bytes = await c.read();
+      final telemetry =
+          WatchDebugTelemetry.decode(bytes).copyWithReceivedAt(DateTime.now());
+      DebugLogService().log(
+        'debug_telemetry',
+        'activity=${telemetry.activityState.label}  '
+        'criteria=${telemetry.criteria?.label ?? 'none'}  '
+        'path=${telemetry.proxPath.label}  '
+        'verdict=${telemetry.verdictFinal.label}  '
+        'score=${telemetry.score}/${telemetry.nearThr}  '
+        'poll_met=${telemetry.lastPollMet == 0xFF ? 'never' : telemetry.lastPollMet}  '
+        'anchors=${telemetry.anchors.length}',
+        bytes,
+      );
+      return telemetry;
+    } catch (e) {
+      DebugLogService().log('debug_telemetry', 'read/decode failed: $e', const []);
+      return null;
+    }
+  }
+
   /// The only place watch characteristic handles are created. Runs once per
   /// connect, after service discovery; the loop stops at the first service whose
   /// UUID matches our watch service, so a device advertising several services
@@ -780,6 +828,7 @@ class WatchService {
           if (uuid == BleConstants.watchPendingCharUuid)     _pendingChar     = c;
           if (uuid == BleConstants.watchEmergencyPassCharUuid) _emergencyPassChar = c;
           if (uuid == BleConstants.watchCalibCtrlCharUuid)   _calibChar       = c;
+          if (uuid == BleConstants.watchDebugCharUuid)       _debugChar       = c;
         }
         break;
       }
@@ -866,6 +915,38 @@ class WatchService {
             'state=${p.state.name} accepted=${p.accepted} queries=${p.queries} '
             'score=${p.lastScore} rem=${p.remainingS}s', bytes);
       });
+    }
+
+    // Debug Telemetry (§5.6) — probe: absent on older firmware. Notify carries
+    // a *change hint*, not the payload: the snapshot is up to 456 bytes and a
+    // notification is truncated to MTU−3. So every notification triggers a full
+    // read, and the initial read on connect seeds the first frame (during
+    // enforcement the watch drops the phone link for each anchor poll, so the
+    // app mostly sees one snapshot per reconnect).
+    if (_debugChar != null) {
+      final c = _debugChar!;
+      await c.setNotifyValue(true);
+      // flutter_blue_plus's onValueReceived fires for read() results as well
+      // as notifications, so "read on every value" would loop forever. Decode
+      // what arrived instead: a complete value (a read result, or a
+      // notification that fit the MTU) is emitted as is; only a truncated
+      // notification (payload up to 456 B, firmware §5.6) fails to decode, and
+      // that triggers one read whose result returns through this listener.
+      _debugSub = c.onValueReceived.listen((bytes) {
+        try {
+          _debugController.add(WatchDebugTelemetry.decode(bytes)
+              .copyWithReceivedAt(DateTime.now()));
+        } on FormatException {
+          // Re-read only a genuinely truncated v1 value; an unknown
+          // version or malformed value would just fail again.
+          if (_debugReadInFlight || !WatchDebugTelemetry.looksTruncated(bytes)) return;
+          _debugReadInFlight = true;
+          c.read().catchError((_) => <int>[]).whenComplete(
+              () => _debugReadInFlight = false);
+        }
+      });
+      // The initial read's value is emitted by the listener above.
+      await readDebugTelemetry();
     }
   }
 

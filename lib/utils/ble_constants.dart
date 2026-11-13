@@ -45,12 +45,13 @@ class BleConstants {
   static const String anchorDockRegisterCharUuid = '4a0f000c-f8ce-11ee-8001-020304050607'; // dock register
   static const String anchorDockStatusCharUuid   = '4a0f000d-f8ce-11ee-8001-020304050607'; // dock status
   static const String anchorCalibModeCharUuid    = '4a0f000f-f8ce-11ee-8001-020304050607'; // calibration-v2 phase (…000F)
+  static const String anchorDebugCharUuid        = '4a0f0020-f8ce-11ee-8001-020304050607'; // §4.4 debug telemetry (read + notify)
 
   // ── Watch ─────────────────────────────────────────────────────────────────
   // The watch is the root of trust: it owns the schedule and the clock. This app
   // writes credentials/settings/schedule/time/IP table and reads status, seen
   // anchors, pending changes, emergency-pass ledger and calibration progress.
-  // The last four (…0019, …001A, …001B, …001C) are runtime-probed — see
+  // The last five (…0019, …001A, …001B, …001C, …001D) are runtime-probed — see
   // WatchService.hasTimeCharacteristic and friends — so a firmware build without
   // them degrades instead of throwing.
   static const String watchServiceUuid         = '4a0f0010-f8ce-11ee-8001-020304050607';
@@ -66,6 +67,7 @@ class BleConstants {
   static const String watchPendingCharUuid     = '4a0f001a-f8ce-11ee-8001-020304050607'; // §9.5 (probe)
   static const String watchEmergencyPassCharUuid = '4a0f001b-f8ce-11ee-8001-020304050607'; // §9.6 (probe)
   static const String watchCalibCtrlCharUuid   = '4a0f001c-f8ce-11ee-8001-020304050607'; // §4.10.7 calibration burst (probe)
+  static const String watchDebugCharUuid       = '4a0f001d-f8ce-11ee-8001-020304050607'; // §5.6 debug telemetry (probe)
 
   // ── Manufacturer data ─────────────────────────────────────────────────────
   // Custom company ID (0xFFFF) used in place of Apple's 0x004C so that iOS

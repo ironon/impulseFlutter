@@ -1,7 +1,9 @@
-// Advanced-mode debug menu (spec v2 §2A.4 / §8.13). Three tabs, each a thin view
+// Advanced-mode debug menu (spec v2 §2A.4 / §8.13). Four tabs, each a thin view
 // over something that already exists elsewhere — this file owns no state and performs
 // no decoding:
 //
+//   Proximity — watch …001D + anchor …0020 snapshots, the beep-condition checklists
+//               and a phone-side anchor scan (DebugProximityTab, read-only).
 //   Status  — decoded WatchStatus from AppState.status (WatchService.fromBytes), the
 //             runtime capability probes, and (dev builds only) the write tools.
 //   Meters  — live Prox Score / Dock Status from AnchorTelemetrySession, one anchor at
@@ -32,6 +34,7 @@ import '../services/debug_log_service.dart';
 import '../state/app_state.dart';
 import '../theme/app_theme.dart';
 import '../utils/build_config.dart';
+import 'debug_proximity_tab.dart';
 
 /// Advanced-mode debug menu (§2A.4 / §8.13): decoded Watch Status, live Prox
 /// Score + Dock Status meters, the raw BLE log, and — in dev builds only —
@@ -50,7 +53,7 @@ class _DebugScreenState extends State<DebugScreen> {
   @override
   Widget build(BuildContext context) {
     return DefaultTabController(
-      length: 3,
+      length: 4,
       child: Scaffold(
         appBar: AppBar(
           title: const Text('Debug'),
@@ -58,7 +61,9 @@ class _DebugScreenState extends State<DebugScreen> {
             indicatorColor: AppTheme.lightOrange,
             labelColor: AppTheme.lightOrange,
             unselectedLabelColor: AppTheme.textGrey,
+            isScrollable: true,
             tabs: [
+              Tab(text: 'Proximity'),
               Tab(text: 'Status'),
               Tab(text: 'Meters'),
               Tab(text: 'Log'),
@@ -67,6 +72,7 @@ class _DebugScreenState extends State<DebugScreen> {
         ),
         body: const TabBarView(
           children: [
+            DebugProximityTab(),
             _StatusTab(),
             _MetersTab(),
             _LogTab(),
@@ -151,6 +157,10 @@ class _StatusTab extends StatelessWidget {
                         : 'absent'),
                 _row('Passes …001B',
                     watch.hasEmergencyPassCharacteristic
+                        ? 'present'
+                        : 'absent'),
+                _row('Debug …001D',
+                    watch.hasDebugTelemetryCharacteristic
                         ? 'present'
                         : 'absent'),
               ],
