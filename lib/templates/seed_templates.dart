@@ -1,3 +1,18 @@
+// The v1 seed templates (spec v2 §2A.2 / §8.8). Each is an isolated class; the UI
+// reads them only through TemplateRegistry, so adding a template is one file plus
+// one line in TemplateRegistry.seeded().
+//
+// Mapping to firmware primitives, which is the whole point of the Normal/Advanced
+// split (there is no "Sunrise Lock" on the watch):
+//   Sunrise Lock -> getAway(bedroom) + beep nightstand + donningGraceS
+//   Study Time   -> stayNear(desk)
+//   Gym Time     -> getOnWifi(gym ssid)
+//   Phone-Free   -> phoneAway(docking anchor)
+//
+// Shared helpers: `_anchorFromFirmness` maps the watch's firmness ladder onto the
+// anchor's light/medium/hard beep pattern so the two never contradict each other in
+// the UI; `_addMinutes` clamps to 23:59 because an event may not span midnight.
+
 import 'package:flutter/material.dart';
 
 import '../models/automation_model.dart';

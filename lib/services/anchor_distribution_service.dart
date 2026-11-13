@@ -1,3 +1,15 @@
+// Anchor distribution: schedule over WiFi/HTTP + mDNS IP discovery (spec v2 §7.3,
+// §8.4). The only LAN code path in the app.
+//
+// Failure model is fire-and-forget by design: an unreachable anchor is a normal
+// state, not an error. Nothing here throws to the UI; failures are logged to
+// DebugLogService and, where it matters, reflected by the §8.16 stale marker.
+//
+// Threading: HTTP and mDNS are async; `MDnsClient` owns a UDP socket that is
+// started and stopped within one call, so there is no long-lived listener. All
+// calls run sequentially per anchor — do not call `refreshAnchorIps` concurrently
+// with itself; two clients would compete for the same multicast socket.
+
 import 'dart:async';
 
 import 'package:http/http.dart' as http;
@@ -31,6 +43,10 @@ class AnchorDistributionService {
 
   Map<String, DateTime>? _lastSuccess; // anchor uuid -> last successful push
 
+  /// Last-success map, persisted as `uuid=ISO8601` strings under one prefs list
+  /// (not JSON — this predates the other stores' JSON style, keep it or migrate).
+  /// Cached in memory for the process; a factory reset calls [clearAll], which
+  /// nulls the cache as well as the key.
   Future<Map<String, DateTime>> _loadLastSuccess() async {
     if (_lastSuccess != null) return _lastSuccess!;
     final prefs = await SharedPreferences.getInstance();
@@ -64,6 +80,10 @@ class AnchorDistributionService {
   }
 
   // ── HTTP push (§7.3) ──────────────────────────────────────────────────────
+  // `POST http://<ip>/schedule` with the v2 blob plus its 4-byte LE CRC, body
+  // type application/octet-stream. Any 2xx counts as acked; there is no
+  // response-body protocol. 6 s timeout: an anchor that has not answered by then
+  // is treated as off-LAN for this sweep.
 
   /// POST the full blob + 4-byte CRC to one anchor. Returns success.
   Future<bool> pushToAnchor(String ip, List<Automation> events) async {
@@ -123,6 +143,11 @@ class AnchorDistributionService {
   }
 
   // ── mDNS IP discovery (§5/§8.4) ───────────────────────────────────────────
+  // Anchors publish `<uuid>.local` (the 16-byte anchor UUID, lowercase, dashed).
+  // Each anchor gets 3 s; the whole sweep is therefore bounded by
+  // 3 s × anchor count and runs only on app foreground / edit-driven sync.
+  // A permission-denied or unavailable mDNS stack is not fatal: manual IPs from
+  // Settings and the `…000E` BLE fallback both still work.
 
   /// Resolve `<anchor-uuid>.local` for every known anchor and record fresh
   /// IPs. Returns the uuids whose IP changed (new IP learned ⇒ push trigger).

@@ -1,3 +1,13 @@
+// The pending-changes view (spec v2 §8.9 item 5).
+//
+// Two possible sources, announced by the banner: the watch's `…001A` queue when it is
+// connected and the characteristic exists, otherwise the app's drift queue. Pull down
+// to run due promotions and re-read the watch.
+//
+// The wire mapping of `changeType` (0 delete, 1 loosen-modify, 2 negate-day,
+// 3 setting) is duplicated from PendingChangeType because the watch sends raw bytes;
+// keep the two in step with firmware §9.5.
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 

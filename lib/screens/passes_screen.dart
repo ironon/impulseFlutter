@@ -1,3 +1,17 @@
+// Emergency passes and the self-binding knobs (spec v2 §8.9 item 4, §8.10).
+//
+// Data sources, in preference order: the watch's own ledger (…001B, authoritative and
+// survives a reinstall) then the app's drift ledger. Both are read in _refresh; the
+// `_fromWatch` flag drives honest copy about which one is counting.
+//
+// Three spend states the UI must keep distinct: success, "no passes left", and
+// `pending` — accepted locally but not yet confirmed by the watch, which is the case
+// §8.10 requires to be stated plainly because enforcement may continue.
+//
+// The allowance and settle-window controls are themselves gated edits (raising /
+// lengthening is a loosening, so they queue 24 h), which is why they show the standard
+// confirm dialog instead of applying on tap.
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 

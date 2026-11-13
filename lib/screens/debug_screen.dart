@@ -1,3 +1,24 @@
+// Advanced-mode debug menu (spec v2 §2A.4 / §8.13). Three tabs, each a thin view
+// over something that already exists elsewhere — this file owns no state and performs
+// no decoding:
+//
+//   Status  — decoded WatchStatus from AppState.status (WatchService.fromBytes), the
+//             runtime capability probes, and (dev builds only) the write tools.
+//   Meters  — live Prox Score / Dock Status from AnchorTelemetrySession, one anchor at
+//             a time.
+//   Log     — DebugLogService's in-memory packet ring buffer, with copy/clear.
+//
+// Release gating: only the write tools are gated, via BuildConfig.debugWriteToolsEnabled
+// (compile-time). Everything else is read-only telemetry and ships in release Advanced
+// mode (§2A.4). The tab itself is only reachable because main.dart adds DebugScreen to
+// the tab list when `advancedMode` is true.
+//
+// TO ADD A PANEL: read CODEMAP.md § "Debug screen" first. The short version — add a
+// card to the relevant tab (or a fourth tab in DebugScreen.build), pull the value from
+// AppState/WatchService/AnchorTelemetrySession rather than opening your own BLE link,
+// keep any write behind BuildConfig.debugWriteToolsEnabled, and log raw bytes through
+// DebugLogService so the Log tab stays complete.
+
 import 'dart:async';
 
 import 'package:flutter/material.dart';
@@ -57,6 +78,13 @@ class _DebugScreenState extends State<DebugScreen> {
 }
 
 // ── Status tab: decoded Watch Status + (dev-only) write tools ────────────────
+// Every row comes from one field of `AppState.status` (a WatchStatus decoded from
+// `…0016`); nothing here reads the device. "No status received yet." means no packet
+// has arrived on this connection — connect the watch or wait for its next notify.
+//
+// The capability rows reflect WatchService's binding state, i.e. which UUIDs the
+// connected firmware actually exposed. They are the quickest way to tell "feature
+// missing" from "feature broken".
 
 class _StatusTab extends StatelessWidget {
   const _StatusTab();
@@ -170,6 +198,16 @@ class _StatusTab extends StatelessWidget {
 }
 
 // ── Dev-only write tools (§2A.4) ─────────────────────────────────────────────
+// These are the integrity-risky controls and the reason BuildConfig exists:
+//   * Force re-push      — reaches AppState.pushScheduleToWatch (honours the gate).
+//   * Write time now     — bypasses the §8.11 trigger rules; 0x02 means the watch
+//                          refused because it would cut an active window short.
+//   * Manual write       — arbitrary bytes to any watch characteristic; can defeat
+//                          any policy the app applies.
+//   * Fingerprint upload — a stub: it prints the firmware blob layout but sends
+//                          nothing (the …000A/…000B transfer is unimplemented, §8.5).
+// They are compiled out of release builds, so `setState`/`_msg` UX here can stay
+// rough — it is a dev tool, not a product surface.
 
 class _WriteTools extends StatefulWidget {
   const _WriteTools();
@@ -190,6 +228,10 @@ class _WriteToolsState extends State<_WriteTools> {
     super.dispose();
   }
 
+  /// Re-push the schedule through AppState (not WatchService directly), so promotion
+  /// and the anchor push both happen as they would for a normal edit. The result name
+  /// is the ScheduleEndResult enum, which is what a dev wants to see: `accepted`,
+  /// `partialQuarantine`, `rejected`, `failed`, or null when the watch is absent.
   Future<void> _forceRepush() async {
     final app = context.read<AppState>();
     final result = await app.pushScheduleToWatch();
@@ -329,6 +371,10 @@ class _WriteToolsState extends State<_WriteTools> {
 }
 
 // ── Meters tab: live Prox Score + Dock Status ────────────────────────────────
+// One AnchorTelemetrySession at a time, only for anchors the PHONE has scanned
+// (an anchor learned from the watch has no `bleRemoteId` and cannot be connected to).
+// The session is torn down in dispose and on switching chips; the anchor's
+// connection budget is the reason for the "keep sessions short" copy.
 
 class _MetersTab extends StatefulWidget {
   const _MetersTab();
@@ -496,6 +542,9 @@ class _MetersTabState extends State<_MetersTab> {
 }
 
 // ── Log tab: the original raw BLE log ────────────────────────────────────────
+// Reads DebugLogService's buffer directly (it is a singleton list, not a stream of
+// history) and repaints on each new entry, optionally auto-scrolling. "Copy all" is
+// the intended way to get a packet capture out of a phone in the field.
 
 class _LogTab extends StatefulWidget {
   const _LogTab();

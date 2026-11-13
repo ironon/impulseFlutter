@@ -1,3 +1,14 @@
+// One positioned block in the Advanced day calendar.
+//
+// Coordinate system (shared with AutomationsScreen): 1 logical pixel per minute,
+// the whole day is 1440 px tall inside one scrollable Stack, and blocks are placed
+// with `Positioned(top: startMinutes, height: durationMinutes)`. The left/width
+// maths implements AutomationService's column packing. Everything here is layout;
+// taps are delegated to the caller (which opens the edit modal).
+//
+// The height-driven detail thresholds are deliberate fades, not bugs: a 15-minute
+// block has no room for a time range, a 30-minute block has no room for criteria.
+
 import 'package:flutter/material.dart';
 import '../models/automation_model.dart';
 import '../services/automation_service.dart';

@@ -1,3 +1,20 @@
+// The template contract (spec v2 §2A.2).
+//
+// A template is a pure, parameterised generator: friendly inputs -> one or more
+// tagged `Automation` blocks, plus the inverse (`reparse`) so an existing instance
+// can be re-opened in the builder. Everything the Normal mode shows — gallery,
+// builder form, onboarding quick-form — is derived from these declarations; no
+// screen knows about a specific template.
+//
+// Contracts that matter:
+//   * `expand` must be deterministic given params, and must reuse UUIDs supplied in
+//     `slotUuids` (spec §8.9 item 3 — a changed UUID turns an edit into a
+//     quarantined delete plus an immediately-active new event);
+//   * `reparse` must accept any block set the template produced, including one
+//     trimmed by a user's Advanced-mode edits;
+//   * params are `dynamic` on purpose (times are {hour,minute} maps, firmness is an
+//     enum name string) so they round-trip through shared_preferences JSON.
+
 import 'package:flutter/material.dart';
 
 import '../models/automation_model.dart';

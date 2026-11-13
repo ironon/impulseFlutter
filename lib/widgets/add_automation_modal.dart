@@ -1,3 +1,18 @@
+// The Advanced-mode commitment editor (spec v2 §8.3). One dialog for create and
+// edit; it returns an [AutomationModalResult] and performs NO persistence, gating or
+// pushing — the calling screen (AutomationsScreen) does that via AppState so that
+// every edit passes the §8.9 gate.
+//
+// Validation is intentionally minimal and local: a WiFi criterion needs a non-empty
+// SSID, everything else needs a target anchor. The spec's full validation list
+// (weekly/monthly ranges, beepAnchors⇒anchorProfile, grace clamp) is enforced by
+// construction here: day fields are only emitted for their recurrence type, the beep
+// profile defaults when the first anchor is ticked, and the grace field is clamped
+// 0–1800 before it is written.
+//
+// UUID stability (§8.9 item 3): editing reuses `existingAutomation.id`; provenance
+// fields are copied through and the *screen* decides whether to detach to manual.
+
 import 'package:flutter/material.dart';
 import '../models/automation_model.dart';
 import '../services/bluetooth_service.dart';

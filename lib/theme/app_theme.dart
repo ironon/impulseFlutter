@@ -1,5 +1,14 @@
+// The app's only theme (spec v2 §9: keep app_theme, calm tone, dark surface).
+//
+// Colours are used directly by screens (`AppTheme.lightOrange`, `textGrey`, …) as
+// well as through ThemeData, so changing a constant here propagates to hand-styled
+// widgets too. Amber/green/red are intentionally NOT in this palette: they carry
+// meaning (pending / on-track / alarming) and are specified at their use sites.
+
 import 'package:flutter/material.dart';
 
+/// The app's palette and dark theme. Widgets use the colour constants directly as
+/// well as via `ThemeData`, so a change here is global on purpose.
 class AppTheme {
   // Color scheme
   static const Color darkGrey = Color(0xFF2B2B2B);

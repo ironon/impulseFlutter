@@ -1,3 +1,14 @@
+// Shared presentation of self-binding verdicts (spec v2 §8.9 item 5).
+//
+// Three pieces: the wording functions, the confirm dialog every edit path shows
+// BEFORE committing, and the amber pending badge. Keeping the copy in one file is
+// what stops two screens describing the same verdict differently — and the voice
+// rule ("no earlier than", never "at") is load-bearing, because promotion waits for
+// a push opportunity and can only ever be later than nominal.
+//
+// `formatWhen` compares calendar days (not instants) so "today"/"tomorrow" stay
+// correct across midnight.
+
 import 'package:flutter/material.dart';
 
 import '../services/commitment_policy_service.dart';
@@ -5,6 +16,9 @@ import '../services/self_binding_policy.dart';
 import '../theme/app_theme.dart';
 
 /// Voice-guide-compliant phrasing of a gate verdict (§8.9 item 5).
+/// One-line headline for a gate verdict: "Applies now", "Applies now — still in
+/// your free-edit window", or "Takes effect no earlier than …". `applyAfter` is
+/// non-null exactly when the outcome is quarantined, so the `!` is safe here.
 String verdictHeadline(EditOutcome outcome) {
   if (!outcome.queued) {
     return outcome.classification == ChangeClassification.tightening
@@ -14,6 +28,9 @@ String verdictHeadline(EditOutcome outcome) {
   return 'Takes effect no earlier than ${formatWhen(outcome.applyAfter!)}';
 }
 
+/// The explanatory sentence under the headline. Deliberately states the *reason*
+/// (harder is always immediate; a settled easing waits; the old rule keeps holding),
+/// because the verdict is the moment the user learns the rule.
 String verdictBody(EditOutcome outcome) {
   if (!outcome.queued) {
     return outcome.classification == ChangeClassification.tightening
@@ -25,6 +42,9 @@ String verdictBody(EditOutcome outcome) {
       'yourself.';
 }
 
+/// Human date/time for a pending promotion: "today 9:00 AM", "tomorrow 9:00 AM",
+/// or "Thu 9:00 AM". Compares calendar days, not instants, so a time just after
+/// midnight still reads "tomorrow" for the previous day.
 String formatWhen(DateTime t) {
   final now = DateTime.now();
   final tomorrow = DateTime(now.year, now.month, now.day + 1);

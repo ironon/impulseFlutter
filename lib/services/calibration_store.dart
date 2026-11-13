@@ -1,3 +1,14 @@
+// App-side cache of per-anchor calibration outcomes (CALIBRATION_V2_DESIGN.md §2.4).
+//
+// The authoritative threshold lives in the ANCHOR's NVS fingerprint blob; this
+// store only remembers what the app was last told, so the Devices card can show
+// "Calibrated · threshold N" without connecting. Writes happen exclusively in
+// CalibrationScreen after a FINALIZE result; losing it is harmless (the anchor
+// still works, the badge just says "not calibrated").
+//
+// Keys are lowercased anchor UUIDs; persisted as one JSON blob under
+// `anchor_calibration_v1` in shared_preferences.
+
 import 'dart:convert';
 
 import 'package:shared_preferences/shared_preferences.dart';

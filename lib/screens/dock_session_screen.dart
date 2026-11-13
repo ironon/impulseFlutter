@@ -1,3 +1,16 @@
+// The phone-free block screen: setup chooser -> positioning meter -> in-session
+// monitor (spec v2 §8.6).
+//
+// Stateless by design: all session state lives in DockSessionService, and this screen
+// just listens to it. Navigating away therefore does not end the block — that is the
+// point of the service being a singleton.
+//
+// The three monitor states are deliberately three, not two: docked, phone-in-hand, and
+// "we lost the link" (blue-grey, not amber) — collapsing the third into the second
+// would accuse a user who did nothing wrong. Advanced mode adds read-only RSSI
+// diagnostics, including the threshold the anchor uses, because "closer" is not
+// actionable when the phone is already touching the dock.
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 

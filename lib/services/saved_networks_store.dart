@@ -1,3 +1,15 @@
+// Persistence for the saved-networks list (spec v2 §8.15).
+//
+// Storage split is deliberate: SSIDs + order in shared_preferences (one string
+// list), passwords in flutter_secure_storage under `wifi_pw_<ssid>`. Neither
+// backend is reachable from the other's backup, and a factory reset deletes the
+// password keys one at a time so it cannot wipe unrelated Keychain items.
+//
+// The cap is [maxNetworks] = BleConstants.anchorWifiMaxCredSlots (4). It must
+// equal the firmware's ANCHOR_WIFI_MAX_CRED_SLOTS: a longer app list than the
+// anchor's slot table makes offers evict each other silently (§8.15). Reference
+// the constant; never introduce a second literal.
+
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -36,6 +48,13 @@ class SavedNetworksStore {
   bool get isEmpty => _networks.isEmpty;
   bool get isFull => _networks.length >= maxNetworks;
 
+  /// Read SSIDs, then each password from secure storage. `_loaded` makes this a
+  /// one-shot per process: later mutation methods keep the in-memory list and
+  /// prefs in sync, so a second read would be redundant — and after [clearAll]
+  /// the flag is reset so a genuine re-read can happen.
+  ///
+  /// A missing password key degrades to '' rather than dropping the network; the
+  /// SSID is the identity, the password may be re-entered in Settings.
   Future<void> load() async {
     if (_loaded) return;
     final prefs = await SharedPreferences.getInstance();
@@ -82,6 +101,11 @@ class SavedNetworksStore {
 
   /// Renames an existing network's SSID (used by the edit sheet when the SSID
   /// field is changed). Preserves list position.
+  ///
+  /// Password keys are per-SSID, so a rename deletes the old key and writes the
+  /// new one. A rename onto an existing different SSID is rejected (returns
+  /// false) instead of merging — merging two networks would silently pick a
+  /// password, which is exactly the rotated-password confusion §8.14 warns about.
   Future<bool> rename(String oldSsid, String newSsid, String password) async {
     newSsid = newSsid.trim();
     if (newSsid.isEmpty) return false;

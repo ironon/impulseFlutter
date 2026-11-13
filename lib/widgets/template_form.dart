@@ -1,3 +1,15 @@
+// A form rendered from a template's param schema (spec v2 §2A.2). Used by both the
+// Normal-mode builder (full schema) and onboarding (quick-form subset), which is why
+// it takes a `params` list rather than reading the registry itself.
+//
+// Value contract: `values` is a map the caller owns. Every edit reports a *complete
+// copy* through `onChanged`; the widget's local `_values` is the working copy. Maps
+// and enum names are the storage format, so this file is the place to look when a
+// template param round-trips badly.
+//
+// Text controllers are cached per key and disposed together — do not recreate them
+// per build or the field loses its cursor.
+
 import 'package:flutter/material.dart';
 
 import '../models/automation_model.dart';

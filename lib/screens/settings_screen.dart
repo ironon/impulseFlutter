@@ -1,3 +1,18 @@
+// Settings: app mode, self-binding entry points, watch behaviour, saved networks,
+// manual schedule/IP pushes, and (Advanced only) factory reset.
+//
+// State model: this screen keeps its own copies of the three watch settings
+// (`setting_disc_dorm`, `setting_away_dorm`, `setting_tz` in shared_preferences) and
+// writes them locally before pushing. AppState's `pushWatchSettingsFromStored()`
+// re-reads exactly those keys, so the two must stay in sync — if you add a watch
+// setting, add the pref constant here AND the read there.
+//
+// Its push buttons are deliberate manual escape hatches for behaviour that
+// normally flows through AppState. Two of them are not equivalent to the automatic
+// path (see CODEMAP "Suspicious"): `_pushSchedule` pushes the raw service list
+// rather than `AppState.scheduleForPush()`, and `_pushAnchorIps` bumps the sync
+// class with a string literal.
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -10,6 +25,9 @@ import '../theme/app_theme.dart';
 import 'passes_screen.dart';
 import 'pending_changes_screen.dart';
 
+/// The Settings tab. Owns its local mirrors of the watch settings and the manual
+/// push buttons; everything shared lives in [AppState]. Also the only place the
+/// factory reset is offered (Advanced mode only).
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
 
@@ -68,6 +86,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   // ── Actions ───────────────────────────────────────────────────────────────
+  // Each action is fire-and-forget from the UI's point of view: it sets the busy
+  // flag, performs one bounded BLE/HTTP operation, and reports the result in the
+  // banner. The push methods record sync state (§8.16) so a failed manual push is
+  // visible on Devices rather than silently lost.
 
   Future<void> _pushSettings() async {
     if (!_watchService.isConnected) { _show('Watch not connected'); return; }
@@ -389,6 +411,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   // ── Factory reset ─────────────────────────────────────────────────────────
+  // The dialog's job is honesty, not friction: it lists exactly what is erased and
+  // states plainly that the watch and anchors keep enforcing. The reset itself is
+  // FactoryResetService. On success the shell swaps to onboarding on the next frame,
+  // which is the confirmation — so failures are reported in a dialog that survives
+  // that swap rather than in a banner that would not.
 
   Widget _buildResetCard() => Card(
         child: Padding(
@@ -643,6 +670,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   // ── Network section (§8.15) ─────────────────────────────────────────────────
+  // The saved-networks list is infrastructure: it feeds the watch credential push,
+  // anchor provisioning (§8.14) and the watch's own anchor repair. Ceiling is 4 and
+  // comes from SavedNetworksStore.maxNetworks — do not hardcode it in copy either;
+  // the string below is user-facing prose, not a limit.
 
   /// Saved-networks list card: rows per network, add/edit/delete, ceiling copy.
   Widget _buildNetworkCard(AppState app) {

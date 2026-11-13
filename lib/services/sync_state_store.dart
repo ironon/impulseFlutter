@@ -1,3 +1,17 @@
+// Per-payload-class sync state (spec v2 §8.16).
+//
+// Two counters per class, never a stored "stale" flag:
+//   * a monotonic CURRENT revision (authoring copy), bumped on every edit;
+//   * a per-device ACKED revision, advanced only on a confirmed push.
+// A device is behind when `current > acked`. Derived, so it self-heals and fails
+// pessimistic: a reinstall has no acks, everything reads behind, the app re-pushes.
+//
+// The class names below are persisted strings (prefs keys inside the JSON maps),
+// so renaming a constant's *value* orphans existing acked revisions. Add new
+// classes rather than renaming old ones. Per-anchor classes are suffixed with the
+// anchor UUID via [SyncClass.anchorKey], because the same class means a different
+// payload for each anchor.
+
 import 'dart:convert';
 
 import 'package:shared_preferences/shared_preferences.dart';
@@ -103,6 +117,10 @@ class SyncStateStore {
   /// Force a device's ack for a class *behind* current (e.g. an authoritative
   /// CRC mismatch proved it's out of date even though the app believed it had
   /// pushed). §8.16: "mismatch → stale, even if the app believed it pushed."
+  ///
+  /// Implemented by writing `current - 1`, which keeps the store's invariant
+  /// (acked ≤ current) without inventing a negative revision. It is the only way
+  /// acked can move backwards.
   Future<void> markBehind(String deviceId, String classKey) async {
     final cur = current(classKey);
     if (cur == 0) return; // nothing to be behind on

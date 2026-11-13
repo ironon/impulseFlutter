@@ -1,3 +1,22 @@
+// Device record for a paired watch or anchor (spec v2 §4.4/§4.5).
+//
+// Persisted as JSON under `paired_devices` in shared_preferences by
+// BluetoothService, and re-read on every launch. It is the app's only durable
+// record of hardware, so it also carries the per-anchor WiFi provisioning state
+// (§8.14) and the role tags onboarding assigns (§8.1).
+//
+// ID CONVENTION, easy to get wrong:
+//   * watch  — `id` is the BLE remoteId string (MAC on Android, CoreBluetooth
+//              UUID on iOS); `bleRemoteId` duplicates it.
+//   * anchor — `id` is the 16-byte anchor UUID from the iBeacon payload, and
+//              `bleRemoteId` is the transport handle used to connect. An anchor
+//              discovered only via the watch's Seen Anchors (§8.12) has NO
+//              `bleRemoteId`, which is why identify/servo/calibration are
+//              disabled for it.
+//
+// `copyWith` cannot null a field except `distressNotifiedState` (see
+// `clearDistressNotified`), because removal is expressed by clearing the field.
+
 enum DeviceType { watch, anchor, unknown }
 
 class BluetoothDeviceModel {

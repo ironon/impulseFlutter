@@ -1,3 +1,20 @@
+// The phone-docking session (spec v2 §8.6, Mode B) — the app's only long-lived BLE
+// link to an anchor.
+//
+// A singleton ChangeNotifier because the session must outlive the screen: leaving
+// DockSessionScreen must not drop the link, and an app restart mid-window is
+// restored via `dock_session_v1` in shared_preferences.
+//
+// Moving parts: one BLE connection to the docking anchor, Dock Register `…000C`
+// (0x01 while measuring, 0x00 on release), Dock Status `…000D` notifications, a 10 s
+// countdown ticker, a reconnect backoff timer, and a screen wakelock. Phases are in
+// [DockPhase]; the two flags that matter are [_measuring] (anchor is reporting RSSI)
+// and [_windowLive] (the user has started the block, so a drop is worth chasing).
+//
+// Reliability stance (§8.6, impulse_overview §3.2): enforcement follows link
+// quality and fails OPEN. The UI states that plainly; this service never pretends a
+// missing link is a violation.
+
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
@@ -163,6 +180,11 @@ class DockSessionService extends ChangeNotifier {
 
   /// Opens the anchor link and wires up Dock Status. Shared by the initial
   /// connect and every reconnect attempt.
+  ///
+  /// Returns false for every failure mode (connect, discovery, missing
+  /// characteristics, register write) — callers then choose between "failed setup"
+  /// and "chase it". Note that the dock register write happens HERE, before the
+  /// user taps Start; see [_measuring] for why that ordering differs from §8.6.
   Future<bool> _openLink() async {
     final id = _anchorRemoteId;
     if (id == null) return false;
@@ -307,6 +329,10 @@ class DockSessionService extends ChangeNotifier {
     _retryTimer = Timer(d, _attemptReconnect);
   }
 
+  /// One reconnect attempt, on the [_backoff] schedule. Re-writes Dock Register
+  /// 0x01 via [_openLink] because the anchor forgets its docking phone on
+  /// disconnect (firmware §4.11): reconnecting without re-registering would leave
+  /// the anchor reporting "undocked" over a perfectly healthy link.
   Future<void> _attemptReconnect() async {
     if (_phase != DockPhase.reconnecting) return;
     if (remaining == Duration.zero) {
@@ -396,6 +422,13 @@ class DockSessionService extends ChangeNotifier {
   }
 
   // ── Watch-link stand-down (dual-role crash avoidance) ────────────────────
+  // A phoneAway window makes the watch central-connect to the anchor while the
+  // phone holds a peripheral link, which is the documented NimBLE
+  // ble_hs_timer_exp crash (firmware_spec_v2.md §10.1). Calibration already
+  // serialises the roles ("Option A"); a dock session does the same by dropping
+  // our watch link for the duration and restoring it at endSession/tryRestore
+  // failure paths. If the restore fails it is not fatal — the Devices screen
+  // reconnects on demand.
 
   Future<void> _releaseWatchLink() async {
     final ws = WatchService();
@@ -432,6 +465,9 @@ class DockSessionService extends ChangeNotifier {
   }
 
   // ── Persistence across an app restart ────────────────────────────────────
+  // Just three strings: commitment id, anchor BLE id, window end (epoch ms). The
+  // commitment itself is looked up in the current schedule, so a deleted or edited
+  // commitment simply fails to restore rather than resurrecting stale state.
 
   Future<void> _persist() async {
     final c = _commitment;

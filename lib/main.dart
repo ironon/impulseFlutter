@@ -1,3 +1,17 @@
+// App entry point and shell.
+//
+// Boot order matters: `main()` awaits bootstrapAppState() BEFORE runApp(), so the
+// first frame already has the schedule, policy values, saved networks and sync
+// revisions loaded. A screen that reads AppState in initState is therefore safe.
+//
+// The shell is an index-based Scaffold (no router): the tab list is built from
+// AppState.advancedMode, which adds the Debug tab and swaps Commitments (Normal) for
+// Blocks (Advanced). Switching modes never changes what the watch enforces — only
+// what is rendered. Onboarding replaces the entire shell until `onboardingDone`.
+//
+// App lifecycle: `resumed` triggers AppState.onAppForeground() — the single
+// opportunistic-work funnel (promotion, mDNS, stale pushes, time, WiFi sweep).
+
 import 'dart:async';
 
 import 'package:flutter/material.dart';
@@ -21,6 +35,9 @@ Future<void> main() async {
   runApp(ImpulseApp(appState: appState));
 }
 
+/// Root widget: publishes the single [AppState] through Provider and installs the
+/// theme. `.value` is correct here because the state is created in `main()` and
+/// lives for the process — this widget must never dispose it.
 class ImpulseApp extends StatelessWidget {
   const ImpulseApp({super.key, required this.appState});
 
@@ -40,6 +57,13 @@ class ImpulseApp extends StatelessWidget {
   }
 }
 
+/// The app shell: bottom-tab navigation, the empty-network startup warning, and the
+/// lifecycle hook.
+///
+/// Also mirrors the watch's Seen Anchors into BluetoothService so an anchor the phone
+/// has never scanned still appears in Devices (§8.12). Note that this constructs a
+/// fresh [BluetoothDeviceModel] rather than merging with an existing record — see
+/// CODEMAP "Suspicious".
 class MainScreen extends StatefulWidget {
   const MainScreen({super.key});
 

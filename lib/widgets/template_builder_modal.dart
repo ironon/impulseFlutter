@@ -1,3 +1,15 @@
+// The Normal-mode template builder (spec v2 §2A.2 / §8.9 item 3).
+//
+// Loads defaults, overlays re-parsed values when editing, expands to blocks, asks
+// for confirmation if any resulting block change would be quarantined, then hands the
+// old/new block sets to AppState.saveTemplateBlocks — which runs each block through
+// the diff gate itself. This widget never writes commitments directly.
+//
+// The stable-UUID contract lives in the `slotUuids` map: only the `primary` slot is
+// mapped today (every v1 template is 1-to-1), and `expand` falls back to fresh UUIDs
+// for anything else. A future multi-block template must extend this map or it will
+// delete+recreate on every edit.
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 

@@ -1,3 +1,18 @@
+// Per-event `last_edit` + `settled_baseline` (spec v2 §8.9, firmware §9.2).
+//
+// The store the self-binding gate reads to answer "is this commitment still in its
+// free-edit window?". Serialized as one JSON blob under `settle_state_v1`.
+//
+// Lifecycle: AppState.initialize() calls load(), then settleDue() once at startup
+// (that is what turns elapsed windows into baselines). Edits call recordEdit,
+// creations recordCreate, deletions remove. `stateFor` returns null for an event
+// this store has never seen — which SelfBindingPolicy treats as "brand new, fully
+// free" — so a factory reset or reinstall cannot silently lock a user out of a
+// commitment they just created.
+//
+// This is a cache of app-side policy state, NOT the root of trust: the watch keeps
+// its own copy and is authoritative where present.
+
 import 'dart:convert';
 
 import 'package:shared_preferences/shared_preferences.dart';

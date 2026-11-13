@@ -1,3 +1,37 @@
+// The single reactive state layer (spec v2 §2) and the schedule coordinator.
+//
+// WHAT THIS IS
+// One `ChangeNotifier` owning: the authoring schedule (via AutomationService), the
+// self-binding policy + settle state, the drift trust stores, saved networks, sync
+// revisions, live watch status, pending changes, and mode/onboarding prefs. Screens
+// never talk to a service to *read* state; they read this. Writes that can change
+// what a device enforces go through the methods here, so the §8.9 gate cannot be
+// bypassed by a screen.
+//
+// HOW SCREENS SUBSCRIBE (all via package:provider)
+//   * `context.watch<AppState>()`  — rebuild on every notifyListeners (Home, Debug,
+//     Passes, Settings' mode card).
+//   * `context.select<AppState, T>(...)` — rebuild only when T changes (main.dart
+//     uses this for onboardingDone / advancedMode / shouldWarnNoNetworks).
+//   * `Consumer<AppState>` — scoped rebuild (Devices sync marker).
+//   * direct `context.read<AppState>()` for actions, never for rendering.
+//
+// NOTIFICATION DISCIPLINE
+// `notifyListeners()` is called after any state mutation a widget could display.
+// Broadcast streams from services feed it: watch status, and a drift `watch()` over
+// the pending queue. There is no polling anywhere.
+//
+// THREADING
+// UI isolate only. Everything async is a Future/Stream on the main event loop; no
+// isolates, no locks. Methods that touch BLE await bounded timeouts inside
+// WatchService/AnchorService, so a UI action can stall for seconds but never forever.
+//
+// LIFECYCLE
+// `initialize()` must be awaited before the first frame (main.dart does this) — it
+// loads every store, subscribes to status/pending, seeds the schedule revision and
+// arms notifications. `dispose()` only cancels the two subscriptions; the singleton
+// services outlive it.
+
 import 'dart:async';
 import 'dart:convert';
 
@@ -130,11 +164,17 @@ class AppState extends ChangeNotifier {
   StreamSubscription<List<PendingChangeRow>>? _pendingSub;
 
   // ── Live watch state ──
+  // `_status` is pushed from WatchService.statusStream. Null means "no packet yet
+  // this connection" — distinct from "not connected", which is watchConnected.
   WatchStatus? _status;
   WatchStatus? get status => _status;
   bool get watchConnected => _watch.isConnected;
 
   // ── Pending-changes state (§8.9 item 5) ──
+  // Two sources, deliberately kept apart: `_pendingRows` is the local drift queue
+  // (always available), `_watchPendingEntries` is the watch's authoritative …001A
+  // queue (null when absent/unreadable). The screen prefers the watch's when present;
+  // badges use the union.
   List<PendingChangeRow> _pendingRows = const [];
   List<PendingChangeRow> get pendingRows => _pendingRows;
 
@@ -168,6 +208,11 @@ class AppState extends ChangeNotifier {
   List<Automation> get schedule => _automations.automations;
 
   // ── Lifecycle ─────────────────────────────────────────────────────────────
+  // Order is load-bearing: load stores -> read prefs -> build the policy with the
+  // persisted allowance/settle window -> subscribe -> seed the schedule CRC ->
+  // settle/promote -> arm notifications. `_refreshScheduleRevision` must run before
+  // any status packet arrives, otherwise the first CRC confirmation has no baseline
+  // to compare against and every device briefly reads stale.
 
   Future<void> initialize() async {
     await _automations.initialize();
@@ -228,6 +273,12 @@ class AppState extends ChangeNotifier {
 
   /// Call after any BLE connection state change so widgets re-render. Also a
   /// reconcile point with the watch's authoritative queue.
+  ///
+  /// Every connect/disconnect path in the UI calls this: Devices, onboarding,
+  /// dock session (which borrows and restores the watch link), and the internal
+  /// scan-connect used by sync. On connect it also completes pending pass spends
+  /// and kicks an opportunistic sync, so a watch coming into range converges
+  /// without user action (§8.16).
   void connectionChanged() {
     notifyListeners();
     if (_watch.isConnected) {
@@ -261,6 +312,9 @@ class AppState extends ChangeNotifier {
   }
 
   // ── Mode & prefs ──────────────────────────────────────────────────────────
+  // Mode is a rendering preference persisted in `app_mode`; it has no effect on what
+  // devices run (§2A.3). `advancedIntroSeen` exists only to show the one-time
+  // confirmation dialog; `onboardingDone` is what swaps the shell for onboarding.
 
   Future<void> setMode(AppMode mode) async {
     if (_mode == mode) return;
@@ -338,6 +392,9 @@ class AppState extends ChangeNotifier {
 
   // ── Drafts ────────────────────────────────────────────────────────────────
 
+  /// Persist a deferred template setup (§8.1). Drafts never reach a device: they
+  /// are a visible "not running yet" card on the Commitments screen until the user
+  /// finishes the form.
   Future<void> addDraft(TemplateDraft draft) async {
     _drafts.add(draft);
     await _saveDrafts();
@@ -359,6 +416,11 @@ class AppState extends ChangeNotifier {
   }
 
   // ── Commitment edits (ALL edits route through here — §8.9) ───────────────
+  // The screen builds the proposed Automation, this decides whether it applies now
+  // or is quarantined, persists only when it applies, then pushes. A quarantined
+  // edit leaves the OLD event stored and enforcing; the queue row is its intent.
+  // The returned [CommitmentSaveResult] carries both the verdict and the watch push
+  // result so the caller can say what actually happened.
 
   /// Save a new or edited commitment through the diff gate. When the edit is
   /// quarantined the pre-edit state stays active (and enforcing) until the
@@ -419,6 +481,11 @@ class AppState extends ChangeNotifier {
   }
 
   // ── Emergency passes (§8.10) ──────────────────────────────────────────────
+  // Ack-before-decrement is the rule: a spend is only real once the watch confirms
+  // it. The flow has three branches — on-watch ledger (…001B) when present, interim
+  // re-push otherwise, and a held-pending row when neither lands. `PassSpendResult
+  // .pending` therefore means "accepted by the app, not yet by the watch", which the
+  // Passes screen words honestly ("enforcement may continue until then").
 
   /// Spend a pass: immediate, allowed on active windows. Prefers the watch's
   /// on-watch ledger (…001B) when present; otherwise the interim app ledger.
@@ -527,6 +594,10 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Raise or lower the pass allowance. Raising is a loosening (24 h quarantine in
+  /// the local queue AND, when the watch exposes …001B, a SET_ALLOWANCE that the
+  /// watch quarantines by the same rule); lowering applies immediately. Returns the
+  /// **immediately effective** allowance, not the requested one.
   Future<int> changePassAllowance(int allowance) async {
     final v = await policy.changeAllowance(allowance);
     await _persistPolicyValues();
@@ -554,6 +625,9 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  /// Change the free-edit window. Shrinking applies now, growing queues 24 h
+  /// (§8.9 item 4). Always followed by a settings-resync attempt because
+  /// `settle_window_min` travels in the watch Settings payload.
   Future<void> changeSettleWindow(int minutes) async {
     await policy.changeSettleWindow(minutes);
     await _persistPolicyValues();
@@ -564,6 +638,11 @@ class AppState extends ChangeNotifier {
   }
 
   // ── Schedule push & promotion (push opportunities, §8.9 item 5) ──────────
+  // Every push is also a promotion opportunity: due loosenings are applied first,
+  // then the resulting event list is encoded and sent. `scheduleForPush()` is the
+  // single definition of "the schedule the devices should run" — the authored list
+  // plus one-day negates from pass spends. `_refreshScheduleRevision` runs on the
+  // same list so the §8.16 CRC matches what was actually sent.
 
   /// The event list the devices should run: the authored schedule plus one-day
   /// negates for unexpired emergency-pass spends (interim path).
@@ -725,6 +804,14 @@ class AppState extends ChangeNotifier {
   }
 
   // ── Sync state & the stale marker (§8.16) ───────────────────────────────────
+  // Derived state only: `deviceSyncState` compares SyncStateStore's current vs acked
+  // revisions at read time. Three inputs feed it — an edit (bump), an acked push
+  // (setAcked), and a schedule-CRC mismatch from a device (markBehind). Note the
+  // schedule's ack comes from the CRC, not from the END byte: 0x03 means the watch's
+  // effective blob differs, so it is NOT treated as confirmed.
+  //
+  // Three indicators must not be collapsed: this one (sync), liveness (`device
+  // .isConnected`, Home's anchor tiles), and pending changes (`pendingEventIds`).
 
   /// The paired watch's device id (stable key for acked revisions), or null.
   String? get watchDeviceId {
@@ -935,6 +1022,13 @@ class AppState extends ChangeNotifier {
   }
 
   // ── Anchor WiFi re-provisioning (§8.14) ─────────────────────────────────────
+  // Check-then-offer: read …000E, decide, maybe write …0003. Never a blind periodic
+  // overwrite — the read is cheap and the write is the thing that can disturb a
+  // working anchor. The decision table is in checkAndOfferAnchor; the state machine
+  // of the read itself is AnchorService/AnchorWifiStatus.
+  //
+  // `_applyWifiStatus` is the only place a …000E read is folded into the device
+  // record, so an anchor's cached WiFi state cannot drift from its last real read.
 
   T? _firstOrNull<T>(Iterable<T> it) {
     for (final e in it) {
@@ -1094,6 +1188,10 @@ class AppState extends ChangeNotifier {
   }
 
   // ── Saved WiFi networks (§8.15) ─────────────────────────────────────────────
+  // Thin orchestration over SavedNetworksStore: persist, invalidate any cached
+  // "already offered" markers for that SSID (§8.14 rotated-password fix), bump the
+  // watchNetworks revision, and try to converge. The empty-list warning gate lives
+  // here too because it needs both the list and the device history.
 
   /// True once at least one watch or anchor is paired. The empty-networks
   /// startup warning (§8.15) is gated on this — a "just exploring" user with no

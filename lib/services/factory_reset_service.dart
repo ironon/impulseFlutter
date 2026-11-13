@@ -1,3 +1,15 @@
+// The single ordered wipe for "reset the app" (Advanced mode -> Settings).
+//
+// This is the only place that knows every persistence backend the app has, and the
+// only caller of IntegrityStore.wipeAll/DockSessionService.endSession/Fleet clears.
+// When you add a store, add it here — a reset that misses one leaves the app in a state
+// no normal code path can produce.
+//
+// Scope is deliberately the APP only: the watch keeps enforcing, anchors keep their
+// NVS, and nothing here reaches a device. Ordering (quiesce, cancel OS notifications,
+// drift, secure storage, named stores, then a prefs sweep) is load-bearing and
+// explained step by step in run().
+
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'anchor_distribution_service.dart';

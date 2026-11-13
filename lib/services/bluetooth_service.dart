@@ -1,3 +1,20 @@
+// Device registry + BLE discovery.
+//
+// Owns the durable list of paired watches/anchors (JSON in shared_preferences,
+// cached in memory here) and the scan/classify helpers everything else uses.
+// It is the single writer of BluetoothDeviceModel records, so DB-ish concerns
+// (ID choice, dedupe) live here rather than in screens.
+//
+// Threading: UI isolate, async. `startScan()` wraps FlutterBluePlus's global scan
+// stream with a 15 s timeout; callers listen until the stream ends or cancel.
+// There is no per-call scan object, so two simultaneous scans share one adapter
+// scan (see CODEMAP "Suspicious" for the consequences).
+//
+// Anchor identity: anchors are keyed by the 16-byte UUID inside the iBeacon
+// manufacturer data (company 0xFFFF), not by remoteId, so the same physical
+// anchor keeps one record across phones/reinstalls; `bleRemoteId` is what you
+// connect with.
+
 import 'dart:convert';
 
 import 'package:flutter_blue_plus/flutter_blue_plus.dart' as fbp;
@@ -6,6 +23,12 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../models/bluetooth_device_model.dart';
 import '../utils/ble_constants.dart';
 
+/// The in-memory registry of every watch and anchor this install has ever paired,
+/// mirrored to `paired_devices` in shared_preferences.
+///
+/// Call [initialize] once before reading in a session (the screens do it in
+/// `initState`); until then the list is empty. Mutation methods persist eagerly, so
+/// a crash between calls cannot lose a record.
 class BluetoothService {
   static final BluetoothService _instance = BluetoothService._internal();
   factory BluetoothService() => _instance;
@@ -54,6 +77,12 @@ class BluetoothService {
     );
   }
 
+  /// Insert or REPLACE the record with the same `id`. Replacement is total: any
+  /// field the caller did not carry over is lost. That is the right semantics for
+  /// "the authoritative record just changed" (e.g. AppState folding a fresh
+  /// `…000E` read in) and the wrong one for "I only learned an RSSI" — use
+  /// [updateDeviceStatus] / [updateAnchorIp] for those, and prefer `copyWith`
+  /// over constructing a new model when preserving fields matters.
   Future<void> addOrUpdateDevice(BluetoothDeviceModel device) async {
     final idx = _deviceHistory.indexWhere((d) => d.id == device.id);
     if (idx != -1) {
@@ -163,6 +192,10 @@ class BluetoothService {
   }
 
   // ── Scanning ─────────────────────────────────────────────────────────────
+  // A single global FlutterBluePlus scan (15 s). Classification is by advertised
+  // service UUID first, then by the custom iBeacon manufacturer block, because
+  // iOS strips Apple's 0x004C data but passes company 0xFFFF through. An anchor
+  // may therefore be recognisable in two ways and both must keep working.
 
   /// Starts a BLE scan and returns scan results as a stream.
   /// Devices advertising [WATCH_SERVICE_UUID] are typed as [DeviceType.watch].

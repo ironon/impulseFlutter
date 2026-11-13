@@ -1,3 +1,45 @@
+// Watch-side BLE transport and wire decoders.
+//
+// One process-wide singleton ([WatchService]) holding at most ONE watch
+// connection. It owns the GATT session and every watch characteristic binding;
+// it does NOT own app state — it publishes broadcast streams that AppState
+// subscribes to (`statusStream`, `seenAnchorsStream`, `calibrationStream`) and
+// returns raw verdicts from its writes.
+//
+// Threading/context: plain Dart on the UI isolate. `flutter_blue_plus` delivers
+// notifications on the platform-channel event loop, so every listener here runs
+// on the main isolate and may call `notifyListeners()` indirectly — there is no
+// background isolate and no ISR-style concern. Writes/reads are async and each
+// response-wait is bounded by a 5–10 s timeout so a silent device cannot wedge a
+// caller forever.
+//
+// Characteristic map (UUIDs live in ../utils/ble_constants.dart; wire layouts in
+// MOBILE_APP_SPEC.md §6.1). Every one of these is bound in
+// `_bindCharacteristics` and, where it has one, decoded by the function named:
+//
+//   …0011 WiFi Credentials  write no-resp   JSON {ssid,password}  pushWifiCredentials
+//   …0012 Schedule Ctrl     write+notify    BEGIN/END frames       pushSchedule, _writeCtrlAwaitByte
+//   …0013 Schedule Data     write no-resp   blob chunks           pushSchedule
+//   …0014 Settings          write (notify)  6-byte payload        pushSettings
+//   …0015 Seen Anchors      read+notify     count + entries       _parseSeenAnchors -> seenAnchorsStream
+//   …0016 Watch Status      read+notify     v0.8 layout           WatchStatus.fromBytes -> statusStream
+//   …0017 Anchor IP Table   write (notify)  count + entries       pushAnchorIpTable
+//   …0018 LED Config        (unused)        format TBD            —
+//   …0019 Time              write (notify)  10-byte payload       pushTime        (probed)
+//   …001A Pending Changes   read+notify     count + entries       _parsePendingChanges (probed)
+//   …001B Emergency Pass    write+read      3 opcodes             spend/allowance/ledger (probed)
+//   …001C Calibration Ctrl  write+notify    START/FINALIZE/ABORT  startCalibration etc. (probed)
+//
+// "Probed" means the characteristic may be absent on a given firmware build:
+// callers must check the `has*Characteristic` getters first. Layout changes are
+// exact-byte lockstep with the firmware — the status parsers deliberately do not
+// version-detect (spec §10 item 8).
+//
+// Where the table says "(notify)" for a characteristic the spec declares as
+// Write-with-Response (Settings, Anchor IP Table, Time), the code waits for a
+// notification and treats a 5 s silence as failure. That is the shape of the
+// current firmware, not the spec; see CODEMAP.md §10 item 5 before changing it.
+
 import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
@@ -11,6 +53,11 @@ import '../utils/schedule_encoder.dart';
 import 'debug_log_service.dart';
 
 // ── Calibration progress model (§4.10.7) ─────────────────────────────────────
+// Calibration-v2 (CALIBRATION_V2_DESIGN.md §1, §3): the user demonstrates the
+// near-zone in an INSIDE burst and an EDGE burst; the anchor then computes a
+// per-anchor threshold. The types below are the app's read-only view of that
+// process — the phone never writes a threshold. Everything here is decoded from
+// the watch's `…001C` progress frame.
 
 /// State of an app-guided calibration burst, reported by the watch on
 /// `WATCH_CALIB_CTRL_CHAR_UUID` (firmware §4.10.7 / §5.6).
@@ -146,6 +193,14 @@ class CalibrationProgress {
 }
 
 // ── WatchStatus model ────────────────────────────────────────────────────────
+// The v0.8 layout, fixed offsets, all little-endian:
+//   [0..4]  activity, bt, wifi, worn, battery_pct
+//   [5..21] active_event_id (16 bytes, all-zero ⇒ none)
+//   [21]    condition_met
+//   [22..26] schedule_crc u32
+//   [26]    unreachable_count, then per entry [uuid 16][name_len][name][ts u32]
+// Consumers: AppState._status -> Home dashboard (§8.7), Devices card, Debug
+// screen, and the schedule-CRC confirmation path (§8.16).
 
 /// A queued "couldn't reach this beep-anchor" notification (§8.7).
 class UnreachableAnchor {
@@ -207,7 +262,19 @@ class WatchStatus {
   }
 
   /// True when there is an active event and the watch is actively alarming.
+  /// `condition_met == null` (short/pre-v0.6 payload) is never treated as
+  /// alarming — absence of evidence must not read as a violation.
   bool get isAlarming => activeEventId != null && conditionMet == false;
+
+  /// Decode a `…0016` payload. Offsets are absolute and unversioned; a payload
+  /// shorter than 21 bytes (or a pre-v0.8 build) yields a neutral status with
+  /// `batteryPct == 0xFF` and null optional fields rather than throwing, because
+  /// this is called straight from a notify listener.
+  ///
+  /// `unreachable` entries are bounds-checked one field at a time and the loop
+  /// breaks on a truncated entry, so a partial packet degrades to "fewer
+  /// notifications" instead of an exception. Timestamps are seconds-since-epoch
+  /// as u32 (good until 2106).
 
   static WatchStatus fromBytes(List<int> bytes) {
     // Layout (v0.8): activity u8, bt u8, wifi u8, worn u8, battery u8,
@@ -353,6 +420,10 @@ class PendingChangeEntry {
 }
 
 // ── SeenAnchorInfo ───────────────────────────────────────────────────────────
+// Decoded `…0015`: anchors the WATCH can currently see, with the RSSI the watch
+// measured. Used for §8.12 reachability ("the watch can/cannot see this anchor")
+// and in main.dart to learn anchors the phone itself has not scanned — which is
+// the only way an anchor discovered through the watch enters the device list.
 
 class SeenAnchorInfo {
   final String uuid;
@@ -410,6 +481,11 @@ class WatchService {
   fbp.BluetoothDevice? get device => _device;
 
   // ── Connect / disconnect ─────────────────────────────────────────────────
+  // One watch at a time: connecting while a device is held tears the old link
+  // down first. `connect` discovers services and subscribes to status / seen
+  // anchors / calibration before returning, so callers may immediately read
+  // characteristic-bound getters. Any failure propagates as an exception — the
+  // UI layers wrap this and show an honest message.
 
   Future<void> connect(fbp.BluetoothDevice device) async {
     if (_device != null) await disconnect();
@@ -483,11 +559,19 @@ class WatchService {
 
   /// Read the watch's authoritative pending-loosening queue (`…001A`, §9.5).
   /// Returns null if the characteristic is absent (probe before use).
+  ///
+  /// The returned countdown is the watch's own; the app never adjusts it. This
+  /// queue wins over the local app queue wherever both exist (AppState keeps
+  /// both and unions the event ids for badges).
   Future<List<PendingChangeEntry>?> readPendingChanges() async {
     if (_pendingChar == null) return null;
     final val = await _pendingChar!.read();
     return _parsePendingChanges(val);
   }
+
+  /// `…001A` layout: [count u8] then per entry [event uuid 16][change_type u8]
+  /// [seconds_until_apply u32 LE]. Entries are dropped rather than thrown on if
+  /// the payload is short (a read during an update can be truncated).
 
   List<PendingChangeEntry> _parsePendingChanges(List<int> bytes) {
     if (bytes.isEmpty) return [];
@@ -641,6 +725,8 @@ class WatchService {
     await _calibChar!.write(buf.toBytes(), withoutResponse: false);
   }
 
+  /// Encode [CalibrationPhase] for the START frame. 0 = unphased (legacy),
+  /// 1 = INSIDE, 2 = EDGE — the firmware compares against these exact values.
   static int _phaseByte(CalibrationPhase p) {
     switch (p) {
       case CalibrationPhase.inside: return 1;
@@ -670,6 +756,12 @@ class WatchService {
     }
   }
 
+  /// The only place watch characteristic handles are created. Runs once per
+  /// connect, after service discovery; the loop stops at the first service whose
+  /// UUID matches our watch service, so a device advertising several services
+  /// cannot bind a characteristic from the wrong one. A UUID that is absent
+  /// simply leaves its field null — that absence IS the feature probe used by
+  /// the [hasTimeCharacteristic]-style getters.
   void _bindCharacteristics(List<fbp.BluetoothService> services) {
     for (final svc in services) {
       if (svc.serviceUuid.str.toLowerCase() ==
@@ -694,6 +786,14 @@ class WatchService {
     }
   }
 
+  /// Subscribe to the watch's push characteristics and prime them with one read.
+  ///
+  /// Every notify is decoded and also written to [DebugLogService] with its raw
+  /// bytes — that log is the Debug screen's Log tab and is the only place a
+  /// malformed packet can be inspected. Status/seen-anchor reads are wrapped in
+  /// try/catch because a device may advertise notify without supporting read.
+  ///
+  /// Subscriptions are cancelled in [disconnect]; nothing else cancels them.
   Future<void> _subscribeNotifications() async {
     final dbg = DebugLogService();
 
@@ -770,6 +870,9 @@ class WatchService {
   }
 
   // ── Seen anchors parsing ─────────────────────────────────────────────────
+  // `…0015` payload: [count u8] then per entry [uuid 16][rssi+128 u8][ts u32
+  // LE]. RSSI is biased by +128 on the wire so it fits a u8. Truncated entries
+  // are skipped rather than thrown on.
 
   List<SeenAnchorInfo> _parseSeenAnchors(List<int> bytes) {
     if (bytes.isEmpty) return [];
@@ -792,6 +895,9 @@ class WatchService {
     return result;
   }
 
+  /// 16 raw bytes -> canonical lowercase UUID string in printed order (NOT
+  /// RFC-4122 little-endian). The firmware writes UUIDs in printed order, so the
+  /// same conversion appears in BluetoothService, WatchStatus and AnchorService.
   String _bytesToUuidStr(List<int> b) {
     String h(int start, int end) => b
         .sublist(start, end)
@@ -801,6 +907,10 @@ class WatchService {
   }
 
   // ── WiFi credentials ─────────────────────────────────────────────────────
+  // `…0011` is Write-No-Response and the payload is JSON, one network per write.
+  // No ack exists at the transport level, so "the write completed without an
+  // exception" is the strongest confirmation the app can get (§8.16 treats that
+  // as the ack for the watchNetworks class).
 
   Future<void> pushWifiCredentials(String ssid, String password) async {
     if (_wifiCredChar == null) throw StateError('Not connected to watch');
@@ -814,6 +924,8 @@ class WatchService {
   // ── Settings ─────────────────────────────────────────────────────────────
 
   /// Returns true on success (watch responded 0x01).
+  /// (Interface note: the signature returns `int?` — the response byte — so the
+  /// "true on success" phrasing above is historical; compare against `0x01`.)
   /// Settings payload (v2, 6 bytes — firmware v0.5, lockstep):
   /// `[disconnected_is_dormant u8][away_is_dormant u8][tz_offset int16]
   ///  [settle_window_min u16 (clamped 30–240)]`.
@@ -857,6 +969,12 @@ class WatchService {
   }
 
   // ── Schedule transfer ─────────────────────────────────────────────────────
+  // Three-phase transfer (spec §7.1): BEGIN(len) -> DATA chunks -> END(crc). The
+  // watch answers BEGIN and END on the Ctrl characteristic; a CRC mismatch makes
+  // it discard the whole blob and answer 0x00, which is surfaced as `failed`
+  // (there is no automatic retry — the caller decides). The END verdict is the
+  // watch's own diff-gate decision and must be rendered as such: 0x01 applied,
+  // 0x03 applied with loosening quarantined, 0x04 rejected.
 
   /// Encodes and sends the full schedule to the watch via the 3-phase BLE
   /// transfer protocol. Returns the watch's END verdict (§7.1) — the app must
@@ -881,6 +999,11 @@ class WatchService {
     if (beginByte != 0x01) return ScheduleEndResult.failed;
 
     // ── Phase 2: DATA (chunks ≤ 20 bytes) ──────────────────────────────
+    // 20 = the default ATT MTU (23) minus the 3-byte write header. The spec
+    // suggests negotiating ~512 first; this code does not, so every transfer
+    // uses the smallest payload. Correct but slow for a full week's schedule.
+    // Each chunk is write-no-response with a 10 ms yield to let the Android BLE
+    // stack drain; removing the yield overruns the stack on Android.
     const chunkSize = 20;
     for (int i = 0; i < blob.length; i += chunkSize) {
       final end = (i + chunkSize > blob.length) ? blob.length : i + chunkSize;
@@ -929,6 +1052,12 @@ class WatchService {
   }
 
   // ── Anchor IP table ───────────────────────────────────────────────────────
+  // `…0017`: [count u8] then per anchor [uuid 16][ipv4 4 bytes network order]
+  // [ts u32 LE]. The watch needs this to reach anchors over UDP for beep
+  // commands, so it is re-pushed whenever an IP is learned or a sync says the
+  // watch is behind (AppState._pushAnchorIpTableTracked).
+  // IPv4 is written as raw dotted-quad octets — NOT little-endian — matching the
+  // spec's "network-order" note.
 
   /// Pushes the known anchor IP addresses to the watch.
   /// [anchors] is the list of anchor [BluetoothDeviceModel] entries that have
@@ -972,6 +1101,9 @@ class WatchService {
     );
   }
 
+  /// Closes the two broadcast controllers. Not called anywhere in the app today
+  /// (the singleton lives for the process lifetime); calling it a second time
+  /// after a `connect` would leave listeners on closed controllers.
   void dispose() {
     _statusController.close();
     _seenAnchorsController.close();

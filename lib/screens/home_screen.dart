@@ -1,3 +1,18 @@
+// Home: today, at a glance (spec v2 §8.7).
+//
+// Reads almost everything from AppState (status, schedule, pendingEventIds) and adds
+// two local inputs: seen-anchor telemetry from WatchService and the dock session from
+// DockSessionService. It renders "what the day looks like" first and device telemetry
+// second, which is the intended priority.
+//
+// Notable responsibilities:
+//   * alarming vs on-track comes from `WatchStatus.conditionMet`, not from a clock;
+//   * the dock prompt appears for a phoneAway window that is active or starts within
+//     15 minutes, and doubles as the in-session entry point;
+//   * on first build it attempts to restore a dock session that outlived an app crash
+//     (the anchor forgets its phone on disconnect, so losing the app must not look
+//     like picking the phone up).
+
 import 'dart:async';
 
 import 'package:flutter/material.dart';
@@ -162,6 +177,10 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   // ── Phone-docking prompt (§8.6) ────────────────────────────────────────────
+  // Trigger window: from 15 minutes before a phoneAway start until its end. The chip
+  // remains while a session exists even if the next window is not today, so a manual
+  // session is not orphaned in the UI. `started` only changes the wording — a pass can
+  // be spent on an active window, and docking late is allowed and useless, not blocked.
 
   /// Shows "time to dock your phone" for a phoneAway window that is active or
   /// starts within ~15 minutes, and a session chip while a dock link is live.
@@ -217,6 +236,10 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   // ── Active banner ──────────────────────────────────────────────────────────
+  // Resolution order for "which commitment is featured": the watch's
+  // `active_event_id` when we know it (authoritative), else whichever of today's
+  // windows contains now (a local guess, used while disconnected). Alarming is only
+  // claimed when the watch says so; a guess can be green but never red.
 
   Widget _activeBanner(AppState app, WatchStatus? status,
       List<Automation> today, DateTime now) {
@@ -461,6 +484,10 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   // ── Anchor tile (§8.12) ───────────────────────────────────────────────────
+  // Two independent kinds of "reachable": the watch reports seeing it (`seenAnchors`,
+  // fresh within 5 minutes) and the phone saw it in its last scan. They are shown
+  // separately because they fail separately — the phone can be near a dead anchor the
+  // watch also cannot hear, or vice versa.
 
   Widget _anchorTile(BluetoothDeviceModel anchor) {
     final seen = _seenAnchors.where((s) => s.uuid == anchor.id).firstOrNull;

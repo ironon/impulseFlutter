@@ -1,3 +1,16 @@
+// Advanced mode: the raw-block day calendar (spec v2 §2A, §8.3).
+//
+// One scrollable coordinate space: hour grid, labels and blocks all live in a single
+// 1440 px-tall Stack (1 px per minute) so they scroll together, and columns come from
+// AutomationService's overlap packing. Tapping a block opens AddAutomationModal.
+//
+// This is the only place a template block can be edited directly, and therefore the
+// only place that detaches one: a real change to a template-owned block flips it to
+// `manual` before saving, so the Normal-mode card stops claiming it (§2A.3).
+//
+// Every save/delete shows the gate verdict first and then reports the watch's push
+// verdict (0x03/0x04 included) via a snack bar, never as a silent success.
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 

@@ -1,3 +1,14 @@
+// The template registry (spec v2 §2A.2) — the single list every Normal-mode surface
+// is generated from.
+//
+// Seeded fresh on every launch from code (v1 templates are classes, not stored
+// definitions); `all` preserves insertion order, which is the order the gallery and
+// the onboarding goal picker display. Registering a template is the only step
+// needed to make it appear in both.
+//
+// A template becomes an onboarding goal by exposing a non-null `onboarder`; nothing
+// else marks it. `onboarders` is what OnboardingFlow consumes.
+
 import 'template.dart';
 import 'seed_templates.dart';
 

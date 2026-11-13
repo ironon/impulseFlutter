@@ -1,3 +1,17 @@
+// Per-device settings sheet, shared by the watch and anchor cards in Devices.
+//
+// Rename is local-only (it writes the device record, not the device). Everything
+// else is anchor-specific:
+//   * WiFi state is READ from the anchor (`…000E`) the moment the sheet opens —
+//     never inferred from HTTP timeouts (§8.2) — and the same call may run the
+//     §8.14 check-then-offer, which is why opening this sheet can heal an anchor.
+//   * "Re-send WiFi" offers a saved network on demand.
+//   * Servo open/close respects the firmware's 0x02 rejection during an active
+//     commitment and explains it rather than retrying.
+//
+// Gating: `slots_used` is Advanced-only (§8.2); nothing else is mode-gated here.
+// Failures surface as a status line in the sheet, never as a thrown exception.
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 

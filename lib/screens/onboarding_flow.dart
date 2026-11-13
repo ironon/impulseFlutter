@@ -1,3 +1,18 @@
+// Goal-first onboarding (spec v2 §8.1), also used as "add another goal".
+//
+// Steps are a fixed enum: permissions -> pair watch -> pick goal -> place anchors ->
+// quick-form -> armed. The anchor-placement step is driven entirely by the chosen
+// template's `onboarder.requiredAnchors`, and the quick-form by its `quickFormParams`;
+// this screen therefore contains no goal-specific knowledge.
+//
+// Two escape hatches are load-bearing product decisions, not shortcuts:
+//   * "Just exploring" marks onboarding done at any step (no dead end);
+//   * an unanswerable quick-form input (e.g. the gym's SSID while at home) can be
+//     saved as a visible draft that never runs until finished.
+//
+// Arming goes through AppState.saveTemplateBlocks with an empty old set, so the first
+// commitment is subject to the same gate (and is free while unsettled).
+
 import 'dart:async';
 
 import 'package:flutter/material.dart';

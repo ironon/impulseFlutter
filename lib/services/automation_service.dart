@@ -1,7 +1,25 @@
+// The authored schedule: commitments (`Automation`) and their persistence.
+//
+// Backed by `automations_v2` in shared_preferences — plain JSON, no drift, because
+// the schedule is the app's authoring copy rather than trust machinery (the
+// integrity stores are in drift; see services/integrity_store.dart). The watch
+// holds the enforced copy.
+//
+// Also home of the day-calendar overlap layout used by the Advanced blocks screen:
+// events are packed into columns so overlapping blocks sit side by side.
+//
+// Mutation is via the three CRUD methods only; AppState is the only caller that
+// should write (all edits must pass the self-binding gate first).
+
 import 'dart:convert';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/automation_model.dart';
 
+/// Persistence + day queries for the authored schedule.
+///
+/// Only `AppState` should mutate this (every edit must pass the §8.9 gate first);
+/// screens read `automations`/`getAutomationsForDate` through AppState or directly
+/// for layout.
 class AutomationService {
   static final AutomationService _instance = AutomationService._internal();
   factory AutomationService() => _instance;
@@ -69,6 +87,11 @@ class AutomationService {
       _automations.where((a) => a.appearsOnDate(date)).toList();
 
   // ── Layout helpers ────────────────────────────────────────────────────────
+  // Greedy interval packing, not an optimal one: sort by start (longer first on a
+  // tie), then place each event in the first column whose events it does not
+  // overlap. `totalColumns` is global, so every block is drawn at the same width
+  // (1/N of the grid) even where fewer columns are in use — that is what keeps the
+  // Advanced day view readable at a glance.
 
   Map<String, AutomationLayout> calculateAutomationLayouts(
       List<Automation> automations) {
@@ -106,6 +129,10 @@ class AutomationService {
       others.any((o) => a.startMinutes < o.endMinutes && o.startMinutes < a.endMinutes);
 }
 
+/// Where one event was placed by [AutomationService.calculateAutomationLayouts]:
+/// which column it occupies and how many columns exist that day. `totalColumns` is
+/// global to the day, so a block's width can shrink even when it has no neighbour in
+/// its own column.
 class AutomationLayout {
   final int columnIndex;
   final int totalColumns;

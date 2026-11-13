@@ -1,3 +1,18 @@
+// Devices: scan, pair, and manage the watch and anchors (spec v2 §8.2).
+//
+// This screen is the app's hub for hardware: scanning (including iOS's
+// already-connected peripherals), connecting the watch, the live status panel, the
+// §8.16 sync/stale marker, per-anchor identify/calibrate/settings entry points, and
+// the calibration badge read from CalibrationStore's cache.
+//
+// Note it subscribes to WatchService.statusStream itself (`_watchStatus`) instead of
+// reading AppState.status; the two carry the same packets but this screen owns its
+// rebuild timing. It still calls `AppState.connectionChanged()` after connect and
+// disconnect so the rest of the app learns about the link.
+//
+// All BLE writes here go through WatchService or the modals; the only device-record
+// mutation is `updateDeviceStatus` and, indirectly, `addOrUpdateDevice` from scans.
+
 import 'dart:async';
 
 import 'package:flutter/material.dart';
@@ -16,6 +31,8 @@ import '../theme/app_theme.dart';
 import '../widgets/device_settings_modal.dart';
 import 'calibration_screen.dart';
 
+/// The Devices tab: scan, connect, and per-device management. Owns its scan/status
+/// subscription and message banner; all writes go through the services and modals.
 class DevicesScreen extends StatefulWidget {
   const DevicesScreen({super.key});
 
@@ -59,6 +76,11 @@ class _DevicesScreenState extends State<DevicesScreen> {
   }
 
   // ── Scanning ──────────────────────────────────────────────────────────────
+  // Two phases per refresh: first ask the OS for devices it is already connected to
+  // (invisible to scans on iOS), then run the normal 15 s scan and merge results into
+  // the device registry. Anchors are keyed by their beacon UUID, watches by remoteId;
+  // a scan therefore cannot duplicate an anchor record, but it can overwrite its
+  // transient fields (name/RSSI) — see BluetoothService.addOrUpdateDevice.
 
   Future<void> _startScan() async {
     setState(() { _isScanning = true; _statusMsg = null; });
@@ -123,6 +145,10 @@ class _DevicesScreenState extends State<DevicesScreen> {
   }
 
   // ── Watch connection ──────────────────────────────────────────────────────
+  // Connect, push time (probed — a firmware without …0019 simply ignores it), persist
+  // the connection flag, then tell AppState. Reconnect is manual: there is no
+  // auto-reconnect loop here (DockSessionService has one for its own anchor link, and
+  // AppState's sync path does a bounded scan on demand).
 
   Future<void> _connectWatch(BluetoothDeviceModel model) async {
     setState(() { _statusMsg = 'Connecting…'; });
@@ -177,6 +203,9 @@ class _DevicesScreenState extends State<DevicesScreen> {
   }
 
   // ── Calibration status badge ──────────────────────────────────────────────
+  // Cheap, from the local cache only (CalibrationStore). `confident` requires both a
+  // clean demonstration (confidence > 0) and a real threshold (> 0); a low-confidence
+  // run that fell back to the global default is shown as such rather than as success.
 
   /// "calibrated ✓ (threshold N)" vs "not calibrated", from the local
   /// calibration cache updated whenever a guided calibration FINALIZEs.
@@ -212,6 +241,9 @@ class _DevicesScreenState extends State<DevicesScreen> {
   }
 
   // ── Anchor identify ───────────────────────────────────────────────────────
+  // Beep the anchor so the user can tell which physical box it is. Requires a direct
+  // scan (bleRemoteId): an anchor learned only through the watch's Seen Anchors cannot
+  // be connected to until the phone has seen it itself.
 
   Future<void> _identifyAnchor(BluetoothDeviceModel anchor) async {
     if (anchor.bleRemoteId == null) {

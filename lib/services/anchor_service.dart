@@ -1,3 +1,19 @@
+// Anchor-side BLE operations that are NOT long-lived: identify (beep), WiFi
+// Status read, credential offer, and servo toggle.
+//
+// Ownership split, deliberate: this service uses *connect-per-call* because an
+// anchor's connection budget is small (spec §9, firmware §4.3) and because the
+// app is one of three possible centrals (phone, watch, watch-repair). Each method
+// connects, does one thing, and disconnects in a `finally`. The long-lived
+// phone↔anchor link used by a phone-free block lives in DockSessionService, and
+// read-only meter sessions live in AnchorTelemetrySession.
+//
+// Wire layouts (MOBILE_APP_SPEC.md §6.2) are decoded in AnchorWifiStatus; that
+// class is the only decoder here. All calls are async on the UI isolate; every
+// connect/discover/write is individually timed out and failures are returned as
+// null / an enum value rather than thrown, because callers are UI surfaces that
+// need to distinguish "anchor unreachable" from "anchor said no".
+
 import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
@@ -43,6 +59,11 @@ enum AnchorWifiState {
 
 /// Decoded WiFi Status `…000E` payload (firmware §4.4):
 /// `[state][ssid_len][ssid][ipv4 net-order][rssi+128][slots_used][schedule_crc u32 LE]`.
+///
+/// The trailing `schedule_crc` is optional: a pre-v0.8 anchor yields null, and
+/// the app then falls back to revision-vs-acked for the schedule class (§8.16).
+/// An IPv4 of 0.0.0.0 is reported as null, and an RSSI byte of 0 as null, since
+/// the firmware uses zero to mean "not connected".
 class AnchorWifiStatus {
   final AnchorWifiState state;
   /// SSID of the slot in use or last attempted; empty when never provisioned.
@@ -125,10 +146,19 @@ class AnchorWifiOfferResult {
       accepted: false, connectionError: true, statusAfter: null);
 }
 
+/// Stateless anchor operations over an ephemeral BLE connection.
+///
+/// Each method is one connect → action → disconnect; see the file header for why the
+/// app never holds an anchor link here. Returns typed failure values rather than
+/// throwing, because the UI must distinguish "unreachable" from "refused".
 class AnchorService {
   static final AnchorService _instance = AnchorService._internal();
   factory AnchorService() => _instance;
   AnchorService._internal();
+
+  // ── Identify (beep) ──────────────────────────────────────────────────────
+  // `…0002`: any write makes the anchor beep ~800 ms. Used by onboarding (which
+  // physical anchor is this) and by the Devices card. Connect-per-call.
 
   /// Connects to the anchor and writes the Identify characteristic so it
   /// beeps (~800 ms) — the "which physical anchor is this" affordance.
@@ -160,6 +190,11 @@ class AnchorService {
     }
   }
 
+  // ── Connection plumbing shared by the WiFi paths ─────────────────────────
+  // Both WiFi operations need the same "connect, discover, find our service"
+  // preamble but different disconnect timing, hence a helper that deliberately
+  // leaves the link open and makes the caller own the `finally`.
+
   /// Connects, discovers, and returns the anchor GATT service (or null). Leaves
   /// the connection OPEN — the caller must disconnect. Shared by the WiFi paths.
   Future<fbp.BluetoothService?> _connectAndFindService(
@@ -188,6 +223,12 @@ class AnchorService {
     return null;
   }
 
+  // ── WiFi Status read (`…000E`) ───────────────────────────────────────────
+  // The cheap BLE read §8.14's check-then-offer is built on. Returns null both
+  // when the anchor cannot be reached and when the characteristic is missing
+  // (pre-v0.8 firmware) — callers must treat both as "no information" rather
+  // than as distress.
+
   /// Reads the anchor's WiFi Status characteristic `…000E` (§4.4). This is the
   /// cheap BLE read that §8.14's check-then-offer sweep is built on — never a
   /// blind write. Returns null on connection failure or if the characteristic
@@ -210,6 +251,16 @@ class AnchorService {
       try { await device.disconnect(); } catch (_) {}
     }
   }
+
+  // ── Credential offer (`…0003`) ───────────────────────────────────────────
+  // Firmware v0.8 semantics (lockstep): the write response means ACCEPTED, not
+  // connected. The connection outcome arrives asynchronously on `…000E`, which
+  // is why this method subscribes first and waits.
+  //
+  // Note the shape of the wait: `…0003` is specified as Write-with-Response, yet
+  // the accepted/malformed byte arrives as a notification, so both are listened
+  // for. A missing notification after a successful ATT write is treated as
+  // accepted — the transport-level ack is the only evidence left.
 
   /// Offers a saved network to the anchor by writing `{ssid,password}` JSON to
   /// WiFi Credentials `…0003` (§4.4 / §8.14). Subscribes to `…000E` FIRST so the
@@ -290,6 +341,11 @@ class AnchorService {
       try { await device.disconnect(); } catch (_) {}
     }
   }
+
+  // ── Servo toggle (`…0007`) ───────────────────────────────────────────────
+  // write 0x01 = open/unlock, 0x00 = close/lock; response 0x01 accepted,
+  // 0x02 rejected while an enforcement event involving this anchor is active.
+  // The rejection is a feature: it stops a user unlocking an anchor mid-commitment.
 
   /// Connects to the anchor with [bleRemoteId], writes [value] (0=close, 1=open)
   /// to the toggle characteristic, and returns the firmware's response.

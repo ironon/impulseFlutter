@@ -1,3 +1,13 @@
+// Read-only anchor telemetry for the Debug screen's Meters tab (spec §8.13) and
+// for dock positioning (§8.6, via DockSessionService's own link — this class is
+// not used there).
+//
+// A session is one BLE connection that subscribes to Prox Score `…0009` and Dock
+// Status `…000D`. The anchor's connection budget is small (firmware §4.3: phone +
+// watch + repair), so callers must keep sessions short and must call [dispose].
+// Decoding is intentionally inline and minimal: score is 0..255 score-space, RSSI
+// is biased +128, flags are bit0 fingerprint-active / bit1 low-device-count.
+
 import 'dart:async';
 
 import 'package:flutter_blue_plus/flutter_blue_plus.dart' as fbp;
@@ -43,6 +53,13 @@ class AnchorTelemetrySession {
 
   bool get connected => _device?.isConnected ?? false;
 
+  /// Connect and subscribe. Returns false on any failure, having already torn
+  /// down whatever half-open state was created. On success the caller owns the
+  /// session and must call [dispose].
+  ///
+  /// Both characteristics are also read once, because subscribing to a value the
+  /// anchor only notifies on change would otherwise leave the meters blank until
+  /// the next transition.
   Future<bool> connect() async {
     final dbg = DebugLogService();
     try {
@@ -113,6 +130,7 @@ class AnchorTelemetrySession {
     }
   }
 
+  /// Release the link and cancel subscriptions. Safe to call repeatedly.
   Future<void> disconnect() async {
     await _proxSub?.cancel();
     await _dockSub?.cancel();

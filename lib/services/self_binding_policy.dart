@@ -1,3 +1,22 @@
+// The self-binding delay, as pure functions (spec v2 §8.9, firmware_spec_v2.md
+// §9.1/§9.3/§9.10).
+//
+// This is the integrity core of the app: it decides whether an edit to a
+// commitment applies now or is quarantined for ~24 h. It is deliberately pure —
+// no I/O, no clock of its own (every entry point takes `now`) — because the same
+// classification must be reproducible (a) in app previews and (b) by the watch's
+// own diff gate. Any divergence here shows up as the app promising one thing and
+// the hardware doing another.
+//
+// The asymmetry, in one line: tightening (or no change) is immediate; loosening
+// is immediate only when the commitment is neither active nor starting within
+// [SelfBindingConfig.loosenFreeHorizon]. Non-comparable fields are classified as
+// loosening for gating (spec §8.9 item 2 / firmware §9.1), conservative on
+// purpose.
+//
+// Nothing here mutates state; CommitmentPolicyService applies the decisions and
+// writes the audit/pending records.
+
 import '../models/automation_model.dart';
 
 /// Tunables for the self-binding delay (§8.9 / firmware §9.10). The settle
@@ -27,6 +46,9 @@ class SelfBindingConfig {
 
 /// Canonical three-way classification (firmware §9.1). Non-comparable is
 /// treated as loosening for gating (conservative), but preserved for previews.
+///
+/// Naming caveat: `ChangeClassification.bindsAtLeastAsHard` (the extension below)
+/// is the *binary* gate verdict and is true for tightening and noChange only.
 enum ChangeClassification { noChange, tightening, loosening, nonComparable }
 
 extension ChangeClassificationX on ChangeClassification {
@@ -127,6 +149,9 @@ class SelfBindingPolicy {
   }
 
   // ── Window (start/end minutes) ────────────────────────────────────────────
+  // Minutes since local midnight; no midnight-spanning events are representable,
+  // so "containment" is a simple interval test. Partial shifts (later start AND
+  // later end) are non-comparable and therefore gated as loosening.
 
   static ChangeClassification classifyWindow(
       int fromStart, int fromEnd, int toStart, int toEnd) {
@@ -191,6 +216,12 @@ class SelfBindingPolicy {
   }
 
   // ── Per-field classifications for a same-UUID edit ────────────────────────
+  // Matching by UUID is a precondition, not something done here: callers must pass
+  // the old and new version of the SAME event (spec §8.9 item 3 — delete+recreate
+  // would become a quarantined deletion plus an immediately-active new event).
+  // `classifyFields` reports every changed dimension; `classifyEdit` folds them
+  // with the firmware's rule (one loosening/non-comparable field poisons the
+  // whole edit).
 
   /// Returns the classification of each changed field. Absent fields = no change.
   Map<String, ChangeClassification> classifyFields(
@@ -265,6 +296,10 @@ class SelfBindingPolicy {
   }
 
   // ── Activity / horizon helpers ────────────────────────────────────────────
+  // `isActiveNow` uses half-open windows [start, end): at exactly `end` an event
+  // has stopped enforcing, so a loosening at that instant is free. `nextStart`
+  // looks up to `searchDays` ahead (400 covers a monthly event comfortably);
+  // null means "never again", which is treated as no escape possible.
 
   /// Whether [e] is enforcing right now.
   static bool isActiveNow(Automation e, DateTime now) {
@@ -299,6 +334,11 @@ class SelfBindingPolicy {
   }
 
   // ── The decision for a single changed event ───────────────────────────────
+  // Order matters and encodes the settled-baseline floor (spec §8.9 item 1):
+  // tightening/no-op first (always free), then the unsettled window, which is
+  // free only while the result still binds at least as hard as the last settled
+  // baseline. A brand-new event has no baseline, so its first window is wholly
+  // free. Everything else falls through to the 24 h horizon test.
 
   /// Decide whether an edit to an existing event applies now or is quarantined.
   /// [settle] is the event's current settle state (null ⇒ brand-new event with

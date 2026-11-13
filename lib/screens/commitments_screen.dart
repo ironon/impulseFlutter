@@ -1,3 +1,13 @@
+// Normal mode: commitments as friendly cards (spec v2 §2A).
+//
+// Three card kinds in one list — drafts (§8.1 deferral), template instances grouped by
+// `templateInstanceId`, and manual blocks shown as generic "Custom" cards (never
+// hidden, §2A.3). The gallery is generated from AppState.registry, so this file names
+// no template.
+//
+// This screen reads state only; every mutation goes through TemplateBuilderModal ->
+// AppState.saveTemplateBlocks, which is what keeps template edits inside the §8.9 gate.
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 

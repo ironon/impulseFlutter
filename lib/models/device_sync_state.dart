@@ -1,3 +1,14 @@
+// Sync/stale presentation model (spec v2 §8.16).
+//
+// This is a *derived* view built fresh by AppState.deviceSyncState() on each
+// build — never persisted. Staleness itself is computed from
+// SyncStateStore's revision-vs-acked counters; this class only decides how it is
+// worded and coloured on the Devices screen.
+//
+// The three states must stay distinct from the two other device indicators:
+// liveness (§8.7, green/grey dot) and pending changes (§8.9, amber badge).
+// Collapsing them is the failure mode §8.16 §0.3 warns about.
+
 /// Per-device sync state for the Devices screen (§8.16). Distinct from liveness
 /// (§8.7 — is the device online) and from pending changes (§8.9 — a deliberately
 /// withheld loosening). Three independent indicators; never collapse them.

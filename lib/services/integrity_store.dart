@@ -1,3 +1,16 @@
+// Transactional trust stores (spec v2 §2, §9, §13) over the drift tables in
+// ../data/app_database.dart: pending-changes queue, emergency-pass ledger, audit
+// trail.
+//
+// Why drift: these three must be atomic, timestamped and migration-safe. Every
+// write that changes the queue or the ledger also writes its audit row in the
+// SAME transaction, so the queue and its history can never disagree.
+//
+// Who calls this: CommitmentPolicyService (queue/cancel/audit), AppState
+// (promotions, pass spends, reads for screens) and FactoryResetService
+// (wipeAll). Nothing here talks to devices — it is the app's record of what the
+// app decided, mirrored where possible to the watch's `…001A`/`…001B`.
+
 import 'package:drift/drift.dart';
 
 import '../data/app_database.dart';
@@ -18,6 +31,11 @@ class IntegrityStore {
   final AppDatabase _db;
 
   // ── Pending changes queue (§8.9) ──────────────────────────────────────────
+  // Rows are the *intent* of a loosening, not a schedule. `proposedStateJson`
+  // holds everything needed to apply it later without re-deriving from app state;
+  // `applyAfter` is the earliest moment the UI may claim ("no earlier than").
+  // Promotion is not automatic: AppState.promoteDuePending() runs at push
+  // opportunities (startup, foreground, every schedule push) and marks rows.
 
   /// Queue a quarantined loosening. Returns the row id. Also writes an audit
   /// entry, in a single transaction (the queue and its audit never diverge).
@@ -113,11 +131,19 @@ class IntegrityStore {
 
   /// Drop pending entries whose effect has already expired (e.g. a negate-day
   /// whose date has passed) — dropped, not applied (firmware §9.4).
+  ///
+  /// Currently unused by lib/: AppState.scheduleForPush filters expired pass
+  /// negates by date instead. Kept because it is the correct primitive for a
+  /// future prune-on-launch pass over the queue.
   Future<void> deletePending(int id) {
     return (_db.delete(_db.pendingChanges)..where((t) => t.id.equals(id))).go();
   }
 
   // ── Emergency-pass ledger (§8.10) ─────────────────────────────────────────
+  // A rolling budget: "remaining" is allowance minus rows whose `spentAt` is
+  // within the last 7 days — never a stored counter, so it cannot drift.
+  // `pushed` distinguishes a confirmed spend from one held pending while the
+  // watch was unreachable (ack-before-decrement, §8.10).
 
   /// Spends within the rolling window ending at [now].
   Future<int> passesSpentInWindow(DateTime now,
@@ -216,6 +242,10 @@ class IntegrityStore {
   }
 
   // ── Audit trail (§8.10 / §13) ─────────────────────────────────────────────
+  // Append-only, newest-first when read. Categories currently written:
+  // pass_spent, pass_allowance_changed, settle_window_changed,
+  // loosening_queued/promoted/cancelled, tightening_applied. The Passes screen
+  // maps these to icons — adding a category means adding a case there.
 
   Future<void> _audit({
     required String category,

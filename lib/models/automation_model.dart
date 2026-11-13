@@ -1,6 +1,25 @@
+// The commitment model — the app's mirror of the firmware `Event` struct
+// (spec v2 §4.1, firmware_spec_v2.md §3.2).
+//
+// Two consumers with different rules:
+//   * the firmware, via `ScheduleEncoder`, which sends raw enum *indices*, so
+//     the declaration order of [RecurrenceType], [Criteria], [EnforcementProfile]
+//     and [AnchorEnforcementProfile] is part of the wire format;
+//   * the app UI, which additionally carries app-side-only provenance
+//     (`origin`, `templateInstanceId`, `templateParams`, `color`) that never
+//     reaches a device.
+//
+// There is no `Event`/`Automation` split: this one class is both the authoring
+// model and the pushed model. Validation (spec §4.1) is done by the widgets that
+// build one — see add_automation_modal.dart — not here.
+
 import 'package:flutter/material.dart';
 
 // ── Enumerations (match firmware spec exactly) ──────────────────────────────
+// Order is wire-visible for all four enums below: ScheduleEncoder writes
+// `.index` straight into the blob, and `pendingChangeType` does the same for the
+// watch's queue. Reordering or inserting in the middle re-labels every stored
+// event without any error surfacing.
 
 enum RecurrenceType { once, daily, weekly, monthly }
 
@@ -218,6 +237,12 @@ class Automation {
   }
 
   // ── copyWith ──────────────────────────────────────────────────────────────
+  //
+  // Note the `??` idiom: every nullable field can be *set* but not *cleared*
+  // except `templateInstanceId` (via `clearTemplateInstanceId`). That is
+  // deliberate for provenance and a trap for `anchorId` / `wifiSSID` /
+  // `anchorProfile` — a caller that wants to remove a target must build a fresh
+  // Automation instead. `AddAutomationModal` does exactly that.
 
   Automation copyWith({
     String? id,
@@ -275,6 +300,11 @@ class Automation {
       );
 
   // ── Date matching ─────────────────────────────────────────────────────────
+  // Pure calendar logic, local time, no timezone conversion. `recurrenceType`'s
+  // `referenceDate` is an inclusive lower bound: a recurring event never
+  // "appears" before it. Monthly events on day 29–31 simply do not occur in
+  // shorter months (there is no clamping), and an event is not validated to
+  // avoid spanning midnight — `durationMinutes` can therefore be negative.
 
   bool appearsOnDate(DateTime date) {
     final d = DateTime(date.year, date.month, date.day);

@@ -1,3 +1,19 @@
+// Guided calibration-v2 walkthrough (spec v2 §8.5, CALIBRATION_V2_DESIGN.md §1).
+//
+// This screen is a stepper around a hardware constraint, and the constraint explains
+// most of the code: the watch cannot burst-probe the anchor while the phone holds a
+// link to it (NimBLE dual-role crash, firmware_spec_v2.md §10.1). So each burst runs
+// with the phone DISCONNECTED ("Option A" below): write the phase START, drop the
+// watch link, time the walk locally, reconnect, verify the characteristic is back,
+// then read the progress frame.
+//
+// The app supplies only phase labels and durations; the anchor computes and persists
+// the threshold. Nothing here writes a threshold to firmware (design decision 8: the
+// tolerance choice changes instructions and duration, not any transmitted number).
+//
+// State lives entirely in this widget: a half-finished calibration is not resumable,
+// and leaving mid-burst aborts on the watch (see dispose).
+
 import 'dart:async';
 import 'dart:math' as math;
 
@@ -65,6 +81,10 @@ class _CalibrationScreenState extends State<CalibrationScreen> {
   /// phase (Option A, §8.5).
   fbp.BluetoothDevice? _watchDevice;
 
+  /// Suggested burst lengths, app-side only. The watch clamps whatever it receives,
+  /// and the design doc deliberately leaves the heuristic tunable (§14 of the spec:
+  /// "tune the threshold during testing"). Roomy gets longer because a bigger zone
+  /// needs more watched samples for the anchor's distributions to separate.
   int get _insideDurationS => _tolerance == _Tolerance.tight ? 45 : 75;
   static const _edgeDurationS = 30;
 
@@ -113,6 +133,11 @@ class _CalibrationScreenState extends State<CalibrationScreen> {
   }
 
   // ── Phase drivers ─────────────────────────────────────────────────────────
+  // The shape of every burst: START (watch connected) -> disconnect -> local timer
+  // -> reconnect+verify -> read the progress frame -> advance the step. The walk is
+  // timed by the app, not measured by the phone: §8.5's IMU movement-time heuristic
+  // was never implemented, so a user who stands still still completes the phase (the
+  // anchor's sample counts are the honest signal, and a starved leg is reported).
 
   /// Kick off the INSIDE phase from the intro screen.
   Future<void> _startInside() async {

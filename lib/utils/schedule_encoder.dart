@@ -1,3 +1,15 @@
+// Schedule wire format (spec v2 §7.2, firmware_spec_v2.md §6.2).
+//
+// This is the app's copy of a lockstep byte layout: the watch parses it from the
+// BLE DATA phase, the anchors parse the same bytes (plus a trailing CRC) from
+// `POST /schedule`, and phone_sim/impulse_phone/schedule.py re-implements it for
+// the simulator. Any change here must change all of those, plus
+// SCHEDULE_FORMAT_VERSION in both firmwares' main.cpp.
+//
+// Pure functions, no I/O, no platform channels — which is why this file is the
+// most heavily unit-tested thing in lib/ (test/schedule_encoder_test.dart pins
+// the byte layout against a hand-built vector).
+
 import 'dart:convert';
 import 'dart:math';
 import 'dart:typed_data';
@@ -6,6 +18,9 @@ import '../models/automation_model.dart';
 
 /// Encodes a list of [Automation] events into the binary wire format defined
 /// in firmware_spec.md §6.2, and appends a CRC-32 checksum.
+///
+/// (The authoritative document is now `firmware_spec_v2.md` §6.2; the filename in
+/// the paragraph above is the historical one.)
 ///
 /// The returned [Uint8List] is suitable for:
 ///   - HTTP POST body to an anchor's /schedule endpoint (full blob + CRC).
@@ -18,6 +33,10 @@ class ScheduleEncoder {
   static const int scheduleFormatVersion = 0x02;
 
   // ── CRC-32 (ISO 3309 / zlib polynomial 0xEDB88320) ─────────────────────
+  // Must equal the firmware's esp_crc32_le() over the same bytes: the BLE END
+  // packet and the anchor's HTTP trailer both carry this value, and a mismatch
+  // makes the device discard the transfer (spec §7.1). Computed over the blob
+  // *including* the leading version byte.
 
   static int crc32(Uint8List data) {
     int crc = 0xFFFFFFFF;
@@ -59,6 +78,11 @@ class ScheduleEncoder {
   }
 
   // ── Binary encoder ──────────────────────────────────────────────────────
+  // Field order and widths are the contract (spec v2 §7.2). Two things are easy
+  // to get wrong and both change behaviour:
+  //   * every value is little-endian;
+  //   * enum values are serialized as `.index`, so reordering the Criteria or
+  //     EnforcementProfile enums silently rewrites the meaning of every event.
 
   /// Returns the raw schedule blob WITHOUT the trailing CRC.
   static Uint8List encodeBlob(List<Automation> events) {

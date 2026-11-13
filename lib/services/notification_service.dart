@@ -1,3 +1,18 @@
+// Local OS notifications (spec v2 §8.6 step 1, §8.9 item 5, §8.14 distress).
+//
+// Everything is scheduled locally and ahead of time — no push service, no server.
+// That is what makes the "no midnight push" decision (§7.3) safe: while the app is
+// open it schedules the next 48 h, and the OS delivers even if the app is closed.
+//
+// Triggers that reschedule: AppState.initialize, every schedule push
+// (pushScheduleToWatch), app foreground, and factory reset (with an empty list,
+// which is the cancel path). If you add a notification type, decide deliberately
+// whether `cancelAll()` in rescheduleWindowNotices is allowed to remove it — today
+// the only non-window notices are immediate `show()`s, so it is.
+//
+// Threading: plugin calls are async; failures are swallowed because a missing
+// notification must never break the app's primary surfaces.
+
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:timezone/data/latest.dart' as tzdata;
 import 'package:timezone/timezone.dart' as tz;
@@ -67,6 +82,15 @@ class NotificationService {
   /// Reschedule the coming 48 h of window notices from the authored schedule:
   /// phoneAway → "time to dock" ~5 min before the window; everything else →
   /// a calm start notice. Cancels previous schedules first.
+  ///
+  /// The 48 h horizon (two day-offsets) is the deliberate compromise: long enough
+  /// that a phone left alone for a day still fires tomorrow's windows, short
+  /// enough that a stale schedule cannot nag for a week. `negate` events and days
+  /// they do not appear on are skipped — a spent emergency pass therefore silences
+  /// that day's notice on the next reschedule.
+  ///
+  /// Notifications already in the past are skipped (`isAfter(now)`), so opening
+  /// the app mid-morning does not fire a burst for the morning's windows.
   Future<void> rescheduleWindowNotices(List<Automation> schedule) async {
     if (!_ready) return;
     try {

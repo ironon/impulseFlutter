@@ -1,3 +1,18 @@
+// Applies SelfBindingPolicy decisions to real state: it is the only writer of
+// quarantine rows, settle records and the audit trail, and the only place the
+// pass allowance / settle window are mutated.
+//
+// Role (spec §8.9): INTERIM enforcement until the watch's own diff gate is
+// authoritative, and PERMANENT preview mirror — the watch's verdict always wins
+// where the two disagree. Screens call `previewEdit`/`previewDelete` for the
+// "takes effect no earlier than" dialog before committing, then AppState calls
+// `applyEdit`/`applyDelete`/`applyBlockSet`.
+//
+// Convention: setting-type pending rows use pseudo event UUIDs
+// (`settings:pass_allowance`, `settings:settle_window`) so they can live in the
+// event-shaped pending-changes table. AppState.pendingEventIds filters them out
+// before drawing per-block badges.
+
 import 'dart:convert';
 
 import '../models/automation_model.dart';
@@ -59,6 +74,10 @@ class CommitmentPolicyService {
   SelfBindingPolicy get _policy => SelfBindingPolicy(_config);
 
   // ── Previews (no side effects) ────────────────────────────────────────────
+  // Used by the commit dialogs. They read the settle store but never write, so
+  // they are safe to call on every keystroke / before a dialog is dismissed.
+  // `applyAfter` is only populated when the decision is quarantine — the UI
+  // phrases it as "no earlier than" because promotion needs a push opportunity.
 
   /// Preview an edit without applying it — powers the retarget UX
   /// ("this will queue until Thursday 9am").
@@ -184,6 +203,12 @@ class CommitmentPolicyService {
   }
 
   // ── Emergency passes (§8.10) ──────────────────────────────────────────────
+  // The ledger lives in drift (IntegrityStore); this class owns the policy
+  // numbers. `spendPass`/`changeAllowance` here are the *unit-tested ledger
+  // primitives*; the shipped spend path is AppState.spendPass, which adds
+  // ack-before-decrement and the on-watch `…001B` mirror on top of them.
+  // Raising the allowance is a loosening (24 h), lowering is immediate — the
+  // same asymmetry as any other edit, applied to your escape valve.
 
   Future<int> remainingPasses() async {
     final spent = await integrity.passesSpentInWindow(_now());
