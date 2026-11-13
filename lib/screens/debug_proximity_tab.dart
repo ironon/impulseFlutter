@@ -1,23 +1,31 @@
-// Proximity tab — the first Debug screen tab (§2A.4 / §8.13), built on the
-// firmware's read-only Debug Telemetry characteristics:
+// Proximity tab — the first Debug screen tab (§2A.4 / §8.13), built on the nRF
+// firmware's read-only Debug Telemetry v2 characteristics:
 //
-//   Watch `…001D` (firmware §5.6): the whole enforcement decision — clock,
-//   window, proximity path/verdicts/score, motion, getAway gate, phoneAway
-//   timer, last WATCH_REMOVED send, and every registered anchor.
+//   Watch `…001D` (contract §4.1/§4.2): clock, window and criterion, the
+//   enforcement decision (`last_decision`), the channel-sounding link and its
+//   identity verdict, thresholds, worn detector, radio/escalation, integrity,
+//   and one record per anchor the event names.
 //
-//   Anchor `…0020` (firmware §4.4): WiFi/clock/schedule, every guard that
-//   precedes a beep, the last UDP result, and today's relevant events.
+//   Anchor `…0020` (contract §4.3/§4.4): clock and its provenance, schedule,
+//   alarm state and cap, the last WATCH_REMOVED/WATCH_WORN command with the
+//   fine-grained reason, radio state, dock support, and today's events.
 //
 // The screen is read-only, so nothing here is behind BuildConfig. It also owns
 // no decision logic: the checklists and the interpretation sentence come from
 // `services/beep_conditions.dart` (pure, unit-tested), and the byte layouts from
 // `models/debug_telemetry.dart`.
 //
-// Keep anchor sessions short. An anchor accepts a phone + a watch + repair
-// (firmware §4.3), so this tab opens exactly one AnchorTelemetrySession at a
-// time and disposes it on switch and on dispose. During enforcement the watch
-// also evicts the phone link once per anchor poll (§10.1, Option A), which is
-// why snapshots usually arrive per reconnect rather than as a live stream.
+// CONNECTION BEHAVIOUR DIFFERS FROM THE ESP32 BUILD. The nRF watch does NOT
+// evict the phone once per anchor poll: the app link is its own peripheral
+// connection and the ranging link is a second, central connection to the anchor
+// (CONFIG_BT_MAX_CONN=2). The only thing that drops the phone is a WiFi
+// escalation, which takes BLE off the air entirely (`impulse_ble_quiesce`).
+// So snapshots arrive as notifications while a window is running; when the
+// link goes, the reason byte in the CS link panel says why.
+//
+// Keep anchor sessions short. The anchor holds two links (app and ranging
+// watch), so this tab opens exactly one AnchorTelemetrySession at a time and
+// disposes it on switch and on dispose.
 
 import 'dart:async';
 
@@ -55,6 +63,12 @@ class _DebugProximityTabState extends State<DebugProximityTab> {
   WatchDebugTelemetry? _telemetry;
   AnchorDebugTelemetry? _anchorTelemetry;
 
+  /// Arrival time of each snapshot. The decoders are pure and never stamp a
+  /// clock (the same bytes can be decoded by a test); "how old is this?" is a
+  /// property of the read, so it lives here.
+  DateTime? _telemetryAt;
+  DateTime? _anchorTelemetryAt;
+
   String? _selectedAnchorId;
   bool _manualAnchor = false;
   AnchorTelemetrySession? _session;
@@ -80,10 +94,11 @@ class _DebugProximityTabState extends State<DebugProximityTab> {
       if (!mounted) return;
       setState(() {
         _telemetry = t;
+        _telemetryAt = DateTime.now();
         _adoptDefaultAnchor(t);
       });
     });
-    // Repaint "updated N s ago" without a BLE poll.
+    // Repaint "updated N s ago" and the live age counters without a BLE poll.
     _ticker = Timer.periodic(const Duration(seconds: 1), (_) {
       if (mounted) setState(() {});
     });
@@ -116,6 +131,7 @@ class _DebugProximityTabState extends State<DebugProximityTab> {
     if (!mounted || t == null) return;
     setState(() {
       _telemetry = t;
+      _telemetryAt = DateTime.now();
       _adoptDefaultAnchor(t);
     });
     await _refreshAnchor();
@@ -126,7 +142,10 @@ class _DebugProximityTabState extends State<DebugProximityTab> {
     if (session == null) return;
     final t = await session.readDebugTelemetry();
     if (!mounted || t == null || _session != session) return;
-    setState(() => _anchorTelemetry = t);
+    setState(() {
+      _anchorTelemetry = t;
+      _anchorTelemetryAt = DateTime.now();
+    });
   }
 
   Future<void> _refreshAll() async {
@@ -148,6 +167,7 @@ class _DebugProximityTabState extends State<DebugProximityTab> {
       _selectedAnchorId = choice.id;
       _manualAnchor = true;
       _anchorTelemetry = null;
+      _anchorTelemetryAt = null;
       _message = null;
     });
     await _disconnectAnchor();
@@ -188,7 +208,10 @@ class _DebugProximityTabState extends State<DebugProximityTab> {
     _sessionAnchorId = anchor.id;
     _anchorDebugSub = session.debugStream.listen((t) {
       if (mounted && _session == session) {
-        setState(() => _anchorTelemetry = t);
+        setState(() {
+          _anchorTelemetry = t;
+          _anchorTelemetryAt = DateTime.now();
+        });
       }
     });
     // connect() already seeded the stream, but this listener subscribed after
@@ -198,6 +221,7 @@ class _DebugProximityTabState extends State<DebugProximityTab> {
     setState(() {
       _connecting = false;
       _anchorTelemetry = first;
+      _anchorTelemetryAt = first == null ? null : DateTime.now();
       if (first == null) {
         _message = 'Connected, but this anchor does not expose …0020';
       }
@@ -213,6 +237,7 @@ class _DebugProximityTabState extends State<DebugProximityTab> {
     if (mounted) {
       setState(() {
         _anchorTelemetry = null;
+        _anchorTelemetryAt = null;
         _connecting = false;
       });
     }
@@ -294,11 +319,21 @@ class _DebugProximityTabState extends State<DebugProximityTab> {
       children: [
         _header(w),
         const SizedBox(height: 12),
-        _clockAndWindow(w),
-        const SizedBox(height: 12),
         _decision(w),
         const SizedBox(height: 12),
         _anchors(w),
+        const SizedBox(height: 12),
+        _csLink(w),
+        const SizedBox(height: 12),
+        _thresholds(w),
+        const SizedBox(height: 12),
+        _worn(w),
+        const SizedBox(height: 12),
+        _radioAndEscalation(w),
+        const SizedBox(height: 12),
+        _clocks(w),
+        const SizedBox(height: 12),
+        _integrity(w),
         const SizedBox(height: 12),
         _anchorTelemetryCard(),
         const SizedBox(height: 12),
@@ -312,11 +347,13 @@ class _DebugProximityTabState extends State<DebugProximityTab> {
 
   Widget _header(WatchDebugTelemetry? w) {
     final connected = _watch.isConnected;
-    return _card('Debug telemetry', [
+    return _card('Debug telemetry v2', [
       _row('watch', connected ? 'connected' : 'not connected'),
       _row('…001D present',
           _watch.hasDebugTelemetryCharacteristic ? 'yes' : 'no'),
-      _row('snapshot', _snapshotAge(w)),
+      _row('snapshot', _snapshotAge(_telemetryAt)),
+      _row('snapshot seq', w == null ? '—' : '${w.snapshotSeq}',
+          valueColor: AppTheme.textGrey),
       const SizedBox(height: 8),
       Row(
         children: [
@@ -336,99 +373,56 @@ class _DebugProximityTabState extends State<DebugProximityTab> {
       ),
       const SizedBox(height: 8),
       const Text(
-        'During enforcement the watch drops the phone link for each anchor '
-        'poll, so expect roughly one snapshot per reconnect — not a live '
-        'stream. Notify is only a change hint; this screen reads the full '
-        'payload.',
+        'Notify is an 8-byte change hint, never the payload; every hint '
+        'triggers one full read. Unlike the ESP32 build, the nRF watch keeps '
+        'this link while it ranges (ranging is a second connection to the '
+        'anchor), so snapshots stream. The link only goes when BLE is '
+        'quiesced for a WiFi escalation — the CS link panel shows the reason.',
         style: TextStyle(color: AppTheme.textGrey, fontSize: 11),
       ),
     ]);
   }
 
-  // ── Clock & window ────────────────────────────────────────────────────────
-
-  Widget _clockAndWindow(WatchDebugTelemetry? w) {
-    if (w == null) {
-      return _card('Clock & window', [
-        const Text('No watch snapshot yet.',
-            style: TextStyle(color: AppTheme.textGrey, fontSize: 12)),
-      ]);
-    }
-    final local = w.watchLocalTime;
-    return _card('Clock & window', [
-      _row('watch local time',
-          local == null ? 'unknown' : _fmtTime(local),
-          valueColor: w.timeValid ? null : Colors.redAccent),
-      _row('time valid', w.timeValid ? 'yes' : 'no'),
-      _row('activity', w.activityState.label),
-      _row('window',
-          w.criteria == null
-              ? 'none'
-              : '${w.criteria!.label} ${_fmtMinute(w.startMin)}–'
-                  '${_fmtMinute(w.endMin)}'),
-      _row('profile', w.profileLabel),
-      _row('grace',
-          w.graceActive ? 'active · ${w.graceRemainingS}s left' : 'inactive'),
-      _row('poll interval', '${w.pollIntervalS}s'),
-      _row('since last poll', _fmtAge(w.sinceLastPollS)),
-      _row('last poll met',
-          w.lastPollMet == 0xFF
-              ? 'never polled'
-              : (w.lastPollMet == 0 ? 'no (enforcing)' : 'yes (compliant)')),
-      _row('v0 stub', w.v0Stub ? 'YES — verdicts forced' : 'no',
-          valueColor: w.v0Stub ? Colors.redAccent : null),
-    ]);
-  }
-
-  // ── Proximity decision ────────────────────────────────────────────────────
+  // ── The decision and its plain-English reading ────────────────────────────
 
   Widget _decision(WatchDebugTelemetry? w) {
     if (w == null) {
-      return _card('Proximity decision', [
+      return _card('Decision', [
         const Text('No watch snapshot yet.',
             style: TextStyle(color: AppTheme.textGrey, fontSize: 12)),
       ]);
     }
-    return _card('Proximity decision', [
-      _row('path', w.proxPath.label),
-      _row('since query', _fmtAge(w.sinceLastQueryS)),
-      const SizedBox(height: 6),
+    final decision = w.lastDecision;
+    return _card('Decision', [
       Wrap(
         spacing: 6,
         runSpacing: 6,
         children: [
-          _verdictPill('v0.8', w.verdictV08, false),
-          _verdictPill('v2', w.verdictV2, false),
-          _verdictPill('final', w.verdictFinal, true),
-          if (w.proxV2Authoritative)
-            const _Pill('HMM authoritative', AppTheme.textGrey),
+          _Pill(
+            w.criteria?.label ?? 'NO WINDOW',
+            w.criteria == null ? AppTheme.textGrey : AppTheme.lightOrange,
+            bold: true,
+          ),
+          _Pill(
+            w.conditionMet ? 'MET (silent)' : 'NOT MET',
+            w.conditionMet ? Colors.lightGreen : Colors.redAccent,
+            bold: true,
+          ),
+          if (w.failsafe) _Pill('FAIL-SAFE', Colors.amber, bold: true),
+          if (w.verdictFromLostLink)
+            const _Pill('LOST-LINK AWAY', Colors.amber),
+          if (w.outputSilenced) const _Pill('SILENCED', Colors.amber),
+          if (w.identityConflict)
+            const _Pill('IDENTITY CONFLICT', Colors.redAccent, bold: true),
         ],
       ),
-      const SizedBox(height: 6),
-      _row('verdict source',
-          w.proxV2Authoritative
-              ? 'HMM (v2); the NEAR floor may promote a confident v0.8 NEAR'
-              : 'v0.8 threshold'),
-      const SizedBox(height: 10),
-      _scoreBar(w),
-      _row('threshold source',
-          w.nearThrSource == 1 ? 'anchor-calibrated' : 'global default'),
-      _row('emit',
-          w.emitQ8 == 0
-              ? '0 (dead zone)'
-              : (w.emitQ8 / 256).toStringAsFixed(2)),
-      _row('HMM λ / p_near',
-          '${(w.lambdaQ8 / 256).toStringAsFixed(2)} / '
-          '${(w.pNearU8 / 255 * 100).toStringAsFixed(0)}%'),
-      _row('motion', w.motionState.label),
-      _row('PDR',
-          w.pdrAbstained
-              ? 'abstained'
-              : 'rate ${w.pdrRateU8}, ${w.pdrCovered} slots, '
-                  'llr ${w.pdrLlr}'),
-      _row('dock read', _dockLabel(w.dock)),
-      _row('removed send',
-          '${w.removedResult.label} · ${_fmtAge(w.sinceRemovedS)}'),
+      const SizedBox(height: 8),
+      _row('last decision', decision?.label ?? 'never evaluated'),
+      _row('last poll met', w.lastPollMet?.label ?? 'never polled'),
+      _row('since last poll', _fmtAge(w.sinceLastPollS)),
+      _row('since last burst', _fmtAge(w.sinceLastBurstS)),
+      _row('poll cadence', '${w.pollIntervalS}s'),
+      _row('event index', w.eventIndex?.toString() ?? 'none'),
       const SizedBox(height: 8),
       Container(
         padding: const EdgeInsets.all(8),
@@ -444,77 +438,11 @@ class _DebugProximityTabState extends State<DebugProximityTab> {
     ]);
   }
 
-  Widget _scoreBar(WatchDebugTelemetry w) {
-    final scoreFraction = (w.score / 255).clamp(0.0, 1.0);
-    final thresholdFraction = (w.nearThr / 255).clamp(0.0, 1.0);
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Text('score ${w.score}',
-                  style: const TextStyle(
-                      color: AppTheme.textWhite, fontSize: 12)),
-              const Spacer(),
-              Text('threshold ${w.nearThr}',
-                  style: const TextStyle(
-                      color: AppTheme.textGrey, fontSize: 12)),
-            ],
-          ),
-          const SizedBox(height: 4),
-          LayoutBuilder(builder: (context, c) {
-            final width = c.maxWidth;
-            return SizedBox(
-              height: 14,
-              width: width,
-              child: Stack(
-                children: [
-                  Positioned(
-                    left: 0,
-                    right: 0,
-                    top: 2,
-                    height: 10,
-                    child: Container(
-                      decoration: BoxDecoration(
-                        color: AppTheme.backgroundGrey,
-                        borderRadius: BorderRadius.circular(4),
-                      ),
-                    ),
-                  ),
-                  Positioned(
-                    left: 0,
-                    top: 2,
-                    height: 10,
-                    width: width * scoreFraction,
-                    child: Container(
-                      decoration: BoxDecoration(
-                        color: AppTheme.lightOrange,
-                        borderRadius: BorderRadius.circular(4),
-                      ),
-                    ),
-                  ),
-                  Positioned(
-                    left: (width * thresholdFraction - 1).clamp(0.0, width),
-                    top: 0,
-                    bottom: 0,
-                    child: Container(width: 2, color: AppTheme.textWhite),
-                  ),
-                ],
-              ),
-            );
-          }),
-        ],
-      ),
-    );
-  }
-
   // ── Anchors as seen by the watch ──────────────────────────────────────────
 
   Widget _anchors(WatchDebugTelemetry? w) {
     final records = w?.anchors ?? const <WatchAnchorRecord>[];
-    return _card('Anchors (watch scan)', [
+    return _card('Anchors (channel sounding)', [
       Row(
         children: [
           const Text('Phone distance',
@@ -528,8 +456,11 @@ class _DebugProximityTabState extends State<DebugProximityTab> {
       ),
       const SizedBox(height: 4),
       const Text(
-        'The watch\'s RSSI is an input to the engine, not a distance. The '
-        'phone scan shows what this phone hears from the same beacon.',
+        'The watch ranges one anchor at a time with Bluetooth Channel '
+        'Sounding; distance is centimetres, not RSSI. Records the schedule '
+        'names but the watch has not ranged carry NOT_RANGED — that is '
+        'honest, not a decode failure. The phone scan is independent and shows '
+        'what this phone hears from the same beacon.',
         style: TextStyle(color: AppTheme.textGrey, fontSize: 11),
       ),
       const SizedBox(height: 8),
@@ -542,7 +473,8 @@ class _DebugProximityTabState extends State<DebugProximityTab> {
   }
 
   Widget _anchorRecordCard(WatchAnchorRecord r) {
-    final phone = _phoneRssi[r.uuid];
+    final phone = _phoneRssi[r.anchorUuid];
+    final meters = r.distanceM;
     return Container(
       margin: const EdgeInsets.only(top: 8),
       padding: const EdgeInsets.all(10),
@@ -553,24 +485,254 @@ class _DebugProximityTabState extends State<DebugProximityTab> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(_anchorName(r.uuid),
-              style: const TextStyle(
-                  color: AppTheme.textWhite,
-                  fontSize: 13,
-                  fontWeight: FontWeight.w600)),
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  _anchorName(r.anchorUuid),
+                  style: const TextStyle(
+                      color: AppTheme.textWhite,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600),
+                ),
+              ),
+              _Pill(
+                r.verdict.label,
+                r.verdict == ProxVerdict.near
+                    ? Colors.lightGreen
+                    : r.verdict == ProxVerdict.away
+                        ? AppTheme.lightOrange
+                        : AppTheme.textGrey,
+                bold: true,
+              ),
+            ],
+          ),
           const SizedBox(height: 4),
-          _row('uuid', _short(r.uuid)),
-          _row('watch RSSI',
-              '${r.rssi} dBm · ${_fmtAge(r.sinceSeenS)}'
-              '${r.rssiFresh ? ' · fresh' : ' · stale'}'),
-          _row('last score', r.lastScore.toString()),
+          _row('distance',
+              meters == null ? 'not ranged' : '${meters.toStringAsFixed(2)} m',
+              valueColor: meters == null ? AppTheme.textGrey : null),
+          _row('ifft (primary)',
+              _cm(r.ifftCm)),
+          _row('phase slope', _cm(r.phaseSlopeCm)),
+          _row('CS-RTT', _cm(r.rttCm)),
+          _row('samples', '${r.sampleCount}'),
+          _row('age', _fmtAge(r.ageS)),
+          _row('abstain reason',
+              r.abstainReason?.label ?? (r.ranged ? '—' : 'not ranged'),
+              valueColor: r.abstainReason == null ? AppTheme.textGrey : null),
           _row('flags', _recordFlags(r)),
+          _row('quality',
+              r.quality == null ? 'unknown' : '${r.quality}'),
+          _row('uuid', _short(r.anchorUuid)),
           _row('phone RSSI',
               phone == null ? 'not scanned yet' : '$phone dBm (this phone)',
               valueColor: phone == null ? AppTheme.textGrey : null),
         ],
       ),
     );
+  }
+
+  // ── CS link and identity ──────────────────────────────────────────────────
+
+  Widget _csLink(WatchDebugTelemetry? w) {
+    if (w == null) {
+      return _card('Channel-sounding link', [
+        const Text('No watch snapshot yet.',
+            style: TextStyle(color: AppTheme.textGrey, fontSize: 12)),
+      ]);
+    }
+    final identity = w.identityConflict || w.linkPeerKind == LinkPeerKind.otherAnchor
+        ? 'CONFLICT — ranging a different anchor than the event names'
+        : w.linkPeerKind == LinkPeerKind.eventAnchor
+            ? 'matches the event\'s anchor'
+            : 'identity unknown (the watch cannot tell which anchor it ranges)';
+    return _card('Channel-sounding link', [
+      _row('link up', _yesNo(w.linkUp)),
+      _row('link ready', _yesNo(w.linkReady),
+          valueColor: w.linkReady ? null : Colors.amber),
+      _row('ranging on', _yesNo(w.rangingOn)),
+      const SizedBox(height: 4),
+      _row('peer address', w.linkPeerAddr ?? 'unknown'),
+      _row('peer addr type', w.linkPeerAddrType?.label ?? 'unknown'),
+      _row('peer uuid', _shortOrNone(w.linkPeerUuid)),
+      _row('event anchor', _shortOrNone(w.eventAnchorId)),
+      _row('identity', identity,
+          valueColor: w.identityConflict
+              ? Colors.redAccent
+              : (w.linkPeerKind == LinkPeerKind.eventAnchor
+                  ? Colors.lightGreen
+                  : Colors.amber)),
+      _row('attempts / failures',
+          '${w.linkConnectAttempts} / ${w.linkConnectFailures}'),
+      _row('connected',
+          w.linkConnectedAtMs == null
+              ? 'never'
+              : '${_uptimeAge(w, w.linkConnectedAtMs!)} ago'),
+      _row('last disconnect',
+          w.linkLastDisconnectReason == null
+              ? 'never'
+              : 'HCI 0x${w.linkLastDisconnectReason!.toRadixString(16).padLeft(2, '0')}'),
+      _row('last measure result',
+          w.proxLastResult?.label ?? 'never'),
+      _row('abstain reason', w.csAbstainReason?.label ?? 'unknown'),
+      _row('quality',
+          w.csLastQuality == null ? 'unknown' : '${w.csLastQuality}'),
+    ]);
+  }
+
+  // ── Thresholds ────────────────────────────────────────────────────────────
+
+  Widget _thresholds(WatchDebugTelemetry? w) {
+    if (w == null) {
+      return _card('Thresholds', [
+        const Text('No watch snapshot yet.',
+            style: TextStyle(color: AppTheme.textGrey, fontSize: 12)),
+      ]);
+    }
+    return _card('Thresholds in force', [
+      _row('near', _metres(w.nearEnterCm)),
+      _row('away', _metres(w.awayEnterCm)),
+      _row('near run', '${w.nearRun} consecutive burst(s)'),
+      _row('away run', '${w.awayRun} consecutive burst(s)'),
+      _row('abstain run', '${w.abstainRun} (fail-safe above 5)'),
+      const SizedBox(height: 4),
+      _row('last burst', _cm(w.csDistanceCm)),
+      _row('last ifft', _cm(w.csIfftCm)),
+      _row('last phase slope', _cm(w.csPhaseSlopeCm)),
+      _row('last RTT', _cm(w.csRttCm)),
+      _row('burst samples', '${w.csBurstCount}'),
+      _row('rejected',
+          'range ${w.csRejectedRange} · quality ${w.csRejectedQuality} · '
+              'relay ${w.csSuspectRelay} · no-ifft ${w.csMissingIfft}'),
+    ]);
+  }
+
+  // ── Worn detector ─────────────────────────────────────────────────────────
+
+  Widget _worn(WatchDebugTelemetry? w) {
+    if (w == null) {
+      return _card('Worn detector', [
+        const Text('No watch snapshot yet.',
+            style: TextStyle(color: AppTheme.textGrey, fontSize: 12)),
+      ]);
+    }
+    final still = w.stillForS;
+    final stillThreshold = w.stillThresholdS;
+    final motionThreshold = w.motionThresholdMms2;
+    return _card('Worn detector', [
+      _row('worn', w.worn ? 'yes (on the wrist)' : 'NO (removed)',
+          valueColor: w.worn ? Colors.lightGreen : Colors.amber),
+      _row('source', w.wornSource.label),
+      _row('diagnostic',
+          w.wornDiag == null
+              ? 'unavailable'
+              : '${w.wornDiag} '
+                  '${w.wornSource == WornSource.imu ? 'mmi-m/s²' : 'mV'}'
+                  '${motionThreshold == null ? '' : ' vs $motionThreshold mmi-m/s² threshold'}'),
+      _row('still for',
+          still == null
+              ? 'not applicable (IR build)'
+              : '${still}s'
+                  '${stillThreshold == null ? '' : ' of $stillThreshold s threshold'}'),
+      _row('outputs shaking',
+          w.motorOn || w.buzzerOn
+              ? 'yes — the IMU is measuring the watch, not the wrist'
+              : 'no'),
+      _row('still clock frozen',
+          w.motorOn || w.buzzerOn
+              ? 'alarming: the detector masks its own vibration'
+              : 'no (the stillness clock is running)'),
+    ]);
+  }
+
+  // ── Radio and escalation ──────────────────────────────────────────────────
+
+  Widget _radioAndEscalation(WatchDebugTelemetry? w) {
+    if (w == null) {
+      return _card('Radio & escalation', [
+        const Text('No watch snapshot yet.',
+            style: TextStyle(color: AppTheme.textGrey, fontSize: 12)),
+      ]);
+    }
+    return _card('Radio & escalation', [
+      _row('radio phase', w.radioPhase.label),
+      _row('phase since',
+          w.radioPhaseSinceMs == null
+              ? 'never'
+              : '${_uptimeAge(w, w.radioPhaseSinceMs!)} ago'),
+      _row('WiFi dwell left', '${w.radioPhaseDwellRemainingS}s'),
+      _row('BLE quiesced', _yesNo(w.bleQuiesced)),
+      _row('WiFi on air', _yesNo(w.wifiOnAir)),
+      _row('WiFi connected', _yesNo(w.wifiConnected)),
+      _row('WiFi provisioned', _yesNo(w.wifiProvisioned)),
+      _row('own IPv4', w.ownIpv4 ?? 'none'),
+      const SizedBox(height: 4),
+      _row('pending cmd',
+          '${w.escPendingCmd.label}'
+              '${w.escSinceRequestS == null ? '' : ' · ${w.escSinceRequestS}s'}'),
+      _row('last delivered', w.escLastDeliveredCmd.label),
+      _row('delivered BLE / UDP',
+          '${w.escDeliveredBle} / ${w.escDeliveredUdp}'),
+      _row('WiFi entries / attempts',
+          '${w.escWifiEntries} / ${w.escAttempts}'),
+      _row('last ACK', w.escLastAckResult?.label ?? 'none'),
+      _row('refused', _yesNo(w.ackRefused),
+          valueColor: w.ackRefused ? Colors.amber : null),
+      _row('gave up', _yesNo(w.escGaveUp),
+          valueColor: w.escGaveUp ? Colors.amber : null),
+    ]);
+  }
+
+  // ── Clocks, side by side ──────────────────────────────────────────────────
+
+  Widget _clocks(WatchDebugTelemetry? w) {
+    final a = _anchorTelemetry;
+    final watchTime = w?.watchLocalTime;
+    final anchorTime = a?.anchorLocalTime;
+    return _card('Clocks', [
+      _row('watch local',
+          watchTime == null ? 'invalid' : _fmtTime(watchTime),
+          valueColor: (w?.timeValid ?? false) ? null : Colors.redAccent),
+      _row('watch utc', w?.utcNow?.toString() ?? 'unknown'),
+      _row('watch tz', w == null ? '—' : '${w.tzOffsetMin} min'),
+      _row('watch minute',
+          w?.localMinute == null ? 'invalid' : _fmtMinute(w!.localMinute)),
+      _row('watch source',
+          w?.clockSource?.label ??
+              'not reported (the watch did not fill clock_source)',
+          valueColor: w?.clockSource == ClockSource.never
+              ? Colors.redAccent
+              : AppTheme.textGrey),
+      const SizedBox(height: 6),
+      _row('anchor local',
+          anchorTime == null ? 'invalid' : _fmtTime(anchorTime),
+          valueColor: (a?.timeValid ?? false) ? null : Colors.redAccent),
+      _row('anchor utc', a?.utcNow?.toString() ?? 'unknown'),
+      _row('anchor tz', a == null ? '—' : '${a.tzOffsetMin} min'),
+      _row('anchor minute',
+          a?.localMinute == null ? 'invalid' : _fmtMinute(a!.localMinute)),
+      _row('anchor source', a?.clockSourceLabel ?? 'not read'),
+      const SizedBox(height: 4),
+      _row('skew', _skewText(w, a),
+          valueColor: _skewSeverity(w, a) ? Colors.amber : null),
+    ]);
+  }
+
+  // ── Integrity ─────────────────────────────────────────────────────────────
+
+  Widget _integrity(WatchDebugTelemetry? w) {
+    if (w == null) {
+      return _card('Integrity', [
+        const Text('No watch snapshot yet.',
+            style: TextStyle(color: AppTheme.textGrey, fontSize: 12)),
+      ]);
+    }
+    return _card('Integrity', [
+      _row('quarantined loosenings', '${w.integrityPendingCount}'),
+      _row('settle window', '${w.integritySettleWindowMin} min'),
+      _row('pass allowance', '${w.passAllowance}'),
+      _row('passes left', '${w.passRemaining}'),
+    ]);
   }
 
   // ── Anchor 0020 card ──────────────────────────────────────────────────────
@@ -580,8 +742,9 @@ class _DebugProximityTabState extends State<DebugProximityTab> {
     final a = _anchorTelemetry;
     return _card('Anchor telemetry (…0020)', [
       const Text(
-        'Pick an anchor to open one short read-only session. Anchors hold few '
-        'connections — disconnect by picking another or leaving this tab.',
+        'Pick an anchor to open one short read-only session. An anchor holds '
+        'two links (this phone and the ranging watch), so disconnect by '
+        'picking another or leaving this tab.',
         style: TextStyle(color: AppTheme.textGrey, fontSize: 11),
       ),
       const SizedBox(height: 8),
@@ -624,52 +787,90 @@ class _DebugProximityTabState extends State<DebugProximityTab> {
             'selection.',
             style: TextStyle(color: Colors.amber, fontSize: 11),
           ),
-        _row('wifi / IP',
-            a.wifiConnected
-                ? 'connected · ${a.ip ?? 'no IP'}'
-                : 'not connected · ${a.ip ?? 'no IP'}'),
+        _row('snapshot', _snapshotAge(_anchorTelemetryAt)),
         _row('clock',
             a.timeValid
-                ? '${_fmtMinute(a.localMinute)} local · '
-                    'utc ${a.utcNow} · tz ${a.tzOffsetMin}m'
-                : 'invalid — SNTP has not set it',
+                ? '${_fmtMinute(a.localMinute)} local · utc ${a.utcNow} · '
+                    'tz ${a.tzOffsetMin}m · ${a.clockSourceLabel}'
+                : 'invalid — nothing has set it since boot',
             valueColor: a.timeValid ? null : Colors.redAccent),
-        _row('clock skew', _skewText(a)),
         _row('schedule',
             a.scheduleLoaded
-                ? 'loaded · ${a.todayEventCount} event(s) today'
+                ? '${a.scheduleEventCount} stored · ${a.todayEventCount} today'
                 : 'NOT loaded'),
+        _row('schedule CRC',
+            a.scheduleCrc == null
+                ? 'none'
+                : '0x${a.scheduleCrc!.toRadixString(16)}'),
+        _row('active event',
+            a.activeEventId.isEmpty
+                ? 'none'
+                : '${_short(a.activeEventId)} · '
+                    '${a.activeEventCriteria?.label ?? '?'} '
+                    '${_fmtMinute(a.activeEventStartMin)}–'
+                    '${_fmtMinute(a.activeEventEndMin)} · index '
+                    '${a.activeEventIndex ?? '—'}'),
         _row('beeping',
             a.beeping
-                ? '${a.dockAlarm ? 'dock alarm' : 'watch-removed alarm'} · '
-                    '${a.beepingForS}s of ${a.maxBeepMinutes * 60}s cap · '
-                    'profile ${a.beepProfileLabel} · phase '
-                    '${a.beepPhaseOn ? 'on' : 'off'}'
-                : 'no'),
-        _row('dock',
-            'docked=${a.docked} · phone link '
-                '${a.dockPhoneConnected ? 'registered' : 'none'} · '
-                'seen this window=${a.dockSeenThisWindow}'),
-        _row('dock RSSI',
-            '${a.dockLastRssi} dBm vs threshold ${a.dockRssiThr} dBm · '
-            'undock ${a.undockStreak}/${a.undockConfirm}'),
-        _row('adv undocked', a.advUndocked ? 'flag set' : 'clear'),
-        _row('last UDP',
-            '${a.lastUdpCmdLabel} · ${_fmtAge(a.sinceLastUdpS)} → '
-            '${a.lastUdpResult.label}'),
-        _row('last UDP event', _shortOrNone(a.lastUdpEventId)),
+                ? '${a.beepingForS}s · profile ${a.beepProfileLabel} · phase '
+                    '${a.beepPhaseOn ? 'on' : 'off'} · '
+                    '${a.beepCapRemainingS}s of cap left'
+                : 'no',
+            valueColor: a.beepCapExpired ? Colors.amber : null),
         _row('alarm event', _shortOrNone(a.alarmEventId)),
+        _row('buzzer',
+            a.buzzerCompiledOut ? 'COMPILED OUT' : 'compiled in',
+            valueColor: a.buzzerCompiledOut ? Colors.amber : null),
+        _row('last command',
+            '${a.lastCmd.label} · ${_fmtAge(a.sinceLastCmdS)} · '
+            '${a.lastCmdTransport?.label ?? 'none'}'),
+        _row('last result',
+            '${a.lastCmdResult?.label ?? 'none'} · '
+            '${a.lastCmdReason?.label ?? 'no reason'}'
+            '${a.ackSent ? ' · ACK sent' : (a.lastCmdTransport == AnchorCmdTransport.udp ? ' · no ACK' : '')}'),
+        _row('last cmd event', _shortOrNone(a.lastCmdEventId)),
+        _row('last cmd src', a.lastCmdSrcIp ?? 'none'),
+        _row('rejections',
+            'unknown ${a.rejectUnknownEvent} · window '
+            '${a.rejectOutsideWindow} · negated ${a.rejectNegated} · '
+            'not-in-list ${a.rejectNotInBeepList} · malformed '
+            '${a.rejectMalformed} · accepted ${a.acceptedApplied}'),
+        _row('cap stops', '${a.capStops}'),
+        const SizedBox(height: 4),
+        _row('radio', '${a.radioPhase.label} · '
+            '${a.wifiDwellRemainingS}s dwell left'),
+        _row('WiFi', a.wifiConnected ? 'connected' : 'not connected'),
+        _row('BLE', a.bleQuiesced
+            ? 'quiesced (WiFi has the air)'
+            : '${a.bleAdvertising ? 'advertising' : 'not advertising'} · '
+                '${a.peerLinkCount} peer link(s)'),
+        _row('WiFi fallback', a.wifiFallbackArmed ? 'armed' : 'not armed'),
+        _row('own last IP', a.ownLastIp ?? 'none'),
+        const SizedBox(height: 4),
+        _row('CS reflector',
+            a.csReflectorState?.label ?? 'not built'),
+        _row('CS procedures', _yesNo(a.csProceduresActive)),
+        _row('dock support',
+            a.dockSupported
+                ? 'supported (dock_state ${a.dockState?.label ?? '?'})'
+                : 'NOT SUPPORTED by this firmware',
+            valueColor: a.dockSupported ? null : Colors.amber),
+        _row('servo',
+            a.servoState?.label ?? 'unavailable',
+            valueColor: AppTheme.textGrey),
+        _row('identify', a.identifyActive != 0 ? 'active' : 'idle'),
+        _row('boot count', '${a.bootCount}'),
         const SizedBox(height: 6),
         const Text('Relevant events (this anchor, today)',
             style: TextStyle(color: AppTheme.textWhite, fontSize: 12)),
-        if (a.relevantEvents.isEmpty)
+        if (a.events.isEmpty)
           const Padding(
             padding: EdgeInsets.only(top: 4),
             child: Text('none',
                 style: TextStyle(color: AppTheme.textGrey, fontSize: 12)),
           )
         else
-          for (final e in a.relevantEvents)
+          for (final e in a.events)
             Padding(
               padding: const EdgeInsets.only(top: 4),
               child: Text(
@@ -678,8 +879,11 @@ class _DebugProximityTabState extends State<DebugProximityTab> {
                 '${e.negatedToday ? ' · negated' : ''}'
                 '${e.inBeepList ? ' · beep list' : ''}'
                 '${e.isDockEvent ? ' · dock event' : ''}'
+                '${e.isAnchorIdTarget ? ' · names this anchor' : ''}'
                 '${e.hasAnchorProfile ? ' · profile' : ' · NO profile'}'
-                '${e.windowOpenNow ? ' · OPEN now' : ''}',
+                '${e.clockInvalid ? ' · CLOCK INVALID' : ''}'
+                '${e.windowOpenNow ? ' · OPEN now' : ''}'
+                '${e.activeAlarmEvent ? ' · alarming' : ''}',
                 style: const TextStyle(
                     color: AppTheme.textGrey,
                     fontSize: 11,
@@ -696,7 +900,8 @@ class _DebugProximityTabState extends State<DebugProximityTab> {
     return _card('Beep conditions', [
       const Text(
         'All three outputs, with every guard the firmware evaluates. '
-        '✓ met · ✗ not met · ? unknown.',
+        '✓ met · ✗ not met · ? unknown. Rows marked (status) are outcomes and '
+        'advisories: shown, never counted as the reason.',
         style: TextStyle(color: AppTheme.textGrey, fontSize: 11),
       ),
       if (report.warning != null) ...[
@@ -801,8 +1006,8 @@ class _DebugProximityTabState extends State<DebugProximityTab> {
       }
     }
     for (final r in _telemetry?.anchors ?? const <WatchAnchorRecord>[]) {
-      if (seen.add(r.uuid)) {
-        out.add(_AnchorChoice(r.uuid, _short(r.uuid), false));
+      if (seen.add(r.anchorUuid)) {
+        out.add(_AnchorChoice(r.anchorUuid, _short(r.anchorUuid), false));
       }
     }
     return out;
@@ -819,34 +1024,63 @@ class _DebugProximityTabState extends State<DebugProximityTab> {
     final flags = [
       if (r.isEventAnchor) 'event anchor',
       if (r.inBeepList) 'beep list',
-      if (r.bleMacValid) 'MAC known',
+      if (r.isLinkPeer) 'link peer',
+      if (r.identityConflict) 'identity conflict',
       if (r.ipKnown) 'IP known',
+      if (r.ranged) 'ranged',
     ];
     return flags.isEmpty ? 'none' : flags.join(' · ');
   }
 
-  String _skewText(AnchorDebugTelemetry a) {
-    final w = _telemetry;
-    if (w == null) return 'watch snapshot unavailable';
-    if (!w.timeValid) return 'watch clock invalid';
-    if (!a.timeValid || a.localMinute == 0xFFFF) return 'anchor clock invalid';
-    final diff = (w.localMinute - a.localMinute).abs() % 1440;
-    final skew = diff > 720 ? 1440 - diff : diff;
-    return 'watch ${_fmtMinute(w.localMinute)} vs anchor '
-        '${_fmtMinute(a.localMinute)} · '
-        '${skew == 0 ? 'in sync' : '$skew min apart'}'
-        '${skew > 1 ? ' — warn' : ''}';
+  /// Age of an `*_at_ms` uptime field, derived from the snapshot's own
+  /// `uptime_ms` so a stale snapshot does not look fresh.
+  String _uptimeAge(WatchDebugTelemetry w, int sinceMs) {
+    final ageMs = w.uptimeMs - sinceMs;
+    if (ageMs < 0) return '${(sinceMs - w.uptimeMs) ~/ 1000}s in the future';
+    return '${ageMs ~/ 1000}s';
   }
 
-  String _snapshotAge(WatchDebugTelemetry? w) {
-    final at = w?.receivedAt;
+  String _skewText(WatchDebugTelemetry? w, AnchorDebugTelemetry? a) {
+    if (w == null) return 'watch snapshot unavailable';
+    if (a == null) return 'anchor not read';
+    if (!w.timeValid || w.localMinute == null) return 'watch clock invalid';
+    if (!a.timeValid || a.localMinute == null) return 'anchor clock invalid';
+    final diff = (w.localMinute! - a.localMinute!).abs() % 1440;
+    final skew = diff > 720 ? 1440 - diff : diff;
+    final hours = skew ~/ 60;
+    final minutes = skew % 60;
+    final apart = hours > 0 ? '$hours h $minutes min' : '$minutes min';
+    return 'watch ${_fmtMinute(w.localMinute)} vs anchor '
+        '${_fmtMinute(a.localMinute)} · '
+        '${skew == 0 ? 'in sync' : '$apart apart'}'
+        '${skew > 1 ? ' — ANCHOR CLOCK DISAGREES' : ''}';
+  }
+
+  bool _skewSeverity(WatchDebugTelemetry? w, AnchorDebugTelemetry? a) {
+    if (w == null || a == null) return false;
+    if (!w.timeValid || !a.timeValid) return true;
+    if (w.localMinute == null || a.localMinute == null) return true;
+    final diff = (w.localMinute! - a.localMinute!).abs() % 1440;
+    final skew = diff > 720 ? 1440 - diff : diff;
+    return skew > 1;
+  }
+
+  String _snapshotAge(DateTime? at) {
     if (at == null) return 'not read yet';
     final seconds = DateTime.now().difference(at).inSeconds;
     return 'updated ${seconds < 0 ? 0 : seconds} s ago';
   }
 
-  String _fmtMinute(int m) {
-    if (m == 0xFFFF) return 'never';
+  String _cm(int? cm) {
+    if (cm == null) return 'none';
+    return '$cm cm (${(cm / 100).toStringAsFixed(2)} m)';
+  }
+
+  String _metres(int cm) =>
+      '${(cm / 100).toStringAsFixed(2)} m ($cm cm)';
+
+  String _fmtMinute(int? m) {
+    if (m == null) return 'never';
     return '${(m ~/ 60).toString().padLeft(2, '0')}:'
         '${(m % 60).toString().padLeft(2, '0')}';
   }
@@ -856,30 +1090,15 @@ class _DebugProximityTabState extends State<DebugProximityTab> {
       '${t.minute.toString().padLeft(2, '0')}:'
       '${t.second.toString().padLeft(2, '0')}';
 
-  String _fmtAge(int seconds) =>
-      seconds == 0xFFFF ? 'never' : '${seconds}s ago';
+  String _fmtAge(int? seconds) =>
+      seconds == null ? 'never' : '${seconds}s ago';
 
   String _short(String uuid) =>
       uuid.length <= 8 ? uuid : uuid.substring(0, 8);
 
   String _shortOrNone(String uuid) => uuid.isEmpty ? 'none' : _short(uuid);
 
-  String _dockLabel(int dock) {
-    switch (dock) {
-      case 0: return 'undocked';
-      case 1: return 'docked';
-      default: return 'unknown';
-    }
-  }
-
-  Widget _verdictPill(String title, ProxVerdict v, bool highlight) {
-    final color = v == ProxVerdict.near
-        ? Colors.lightGreen
-        : v == ProxVerdict.away
-            ? AppTheme.lightOrange
-            : AppTheme.textGrey;
-    return _Pill('$title ${v.label}', color, bold: highlight);
-  }
+  String _yesNo(bool v) => v ? 'yes' : 'no';
 
   Widget _card(String title, List<Widget> children) {
     return Card(
@@ -926,7 +1145,7 @@ class _DebugProximityTabState extends State<DebugProximityTab> {
       );
 }
 
-/// A small coloured label used for the three verdicts.
+/// A small coloured label used for the decision and per-anchor verdicts.
 class _Pill extends StatelessWidget {
   final String text;
   final Color color;

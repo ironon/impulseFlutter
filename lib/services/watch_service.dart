@@ -29,7 +29,7 @@
 //   …001A Pending Changes   read+notify     count + entries       _parsePendingChanges (probed)
 //   …001B Emergency Pass    write+read      3 opcodes             spend/allowance/ledger (probed)
 //   …001C Calibration Ctrl  write+notify    START/FINALIZE/ABORT  startCalibration etc. (probed)
-//   …001D Debug Telemetry   read+notify     §5.6 snapshot         readDebugTelemetry -> debugTelemetryStream (probed)
+//   …001D Debug Telemetry   read+notify     v2 snapshot §4.1       readDebugTelemetry -> debugTelemetryStream (probed)
 //
 // "Probed" means the characteristic may be absent on a given firmware build:
 // callers must check the `has*Characteristic` getters first. Layout changes are
@@ -481,9 +481,9 @@ class WatchService {
   /// Progress frames from an app-guided calibration burst (§4.10.7).
   Stream<CalibrationProgress>  get calibrationStream  => _calibController.stream;
 
-  /// Decoded Debug Telemetry snapshots (`…001D`, firmware §5.6). Notify is only
-  /// a change hint — the payload exceeds the MTU, so every notification
-  /// triggers a full read (see [_subscribeNotifications]).
+  /// Decoded Debug Telemetry snapshots (`…001D`, contract §4.1). The notify is
+  /// only an 8-byte change hint — the payload exceeds the MTU, so every hint
+  /// triggers one guarded full read (see [_subscribeNotifications]).
   Stream<WatchDebugTelemetry>  get debugTelemetryStream => _debugController.stream;
 
   bool get isConnected => _device != null &&
@@ -773,28 +773,30 @@ class WatchService {
 
   // ── Debug Telemetry (§5.6) ────────────────────────────────────────────────
 
-  /// Read + decode the watch's Debug Telemetry snapshot (`…001D`).
+  /// Read + decode the watch's Debug Telemetry snapshot (`…001D`, v2 — contract
+  /// §4.1/§4.2).
   ///
   /// Returns null when the firmware does not expose the characteristic or the
   /// read/decode fails, so the debug screen can say "not available" instead of
   /// crashing. The payload is longer than a default-MTU notification: callers
-  /// must use a read (this method), never the notification bytes.
+  /// must use a read (this method) or the hint-driven read below, never the
+  /// notification bytes.
   Future<WatchDebugTelemetry?> readDebugTelemetry() async {
     final c = _debugChar;
     if (c == null) return null;
     try {
       final bytes = await c.read();
-      final telemetry =
-          WatchDebugTelemetry.decode(bytes).copyWithReceivedAt(DateTime.now());
+      final telemetry = WatchDebugTelemetry.decode(bytes);
+      final ranged = telemetry.liveRangedRecord;
       DebugLogService().log(
         'debug_telemetry',
         'activity=${telemetry.activityState.label}  '
         'criteria=${telemetry.criteria?.label ?? 'none'}  '
-        'path=${telemetry.proxPath.label}  '
-        'verdict=${telemetry.verdictFinal.label}  '
-        'score=${telemetry.score}/${telemetry.nearThr}  '
-        'poll_met=${telemetry.lastPollMet == 0xFF ? 'never' : telemetry.lastPollMet}  '
-        'anchors=${telemetry.anchors.length}',
+        'decision=${telemetry.lastDecision?.label ?? 'never'}  '
+        'met=${telemetry.conditionMet}  '
+        'distance=${ranged?.distanceLabel ?? 'not ranged'}  '
+        'peer_kind=${telemetry.linkPeerKind.label}  '
+        'records=${telemetry.anchors.length}',
         bytes,
       );
       return telemetry;
@@ -802,6 +804,21 @@ class WatchService {
       DebugLogService().log('debug_telemetry', 'read/decode failed: $e', const []);
       return null;
     }
+  }
+
+  /// One guarded full read after a change hint or a truncated value.
+  ///
+  /// flutter_blue_plus 1.36.8 delivers `read()` results through the same
+  /// `onValueReceived` stream as notifications, so "read on every value" loops
+  /// forever. The guard makes the loop terminate: the read's own result comes
+  /// back through the listener and decodes cleanly, and only one read can be in
+  /// flight at a time.
+  void _readDebugOnce(fbp.BluetoothCharacteristic c) {
+    if (_debugReadInFlight) return;
+    _debugReadInFlight = true;
+    c.read()
+        .catchError((_) => <int>[])
+        .whenComplete(() => _debugReadInFlight = false);
   }
 
   /// The only place watch characteristic handles are created. Runs once per
@@ -828,7 +845,7 @@ class WatchService {
           if (uuid == BleConstants.watchPendingCharUuid)     _pendingChar     = c;
           if (uuid == BleConstants.watchEmergencyPassCharUuid) _emergencyPassChar = c;
           if (uuid == BleConstants.watchCalibCtrlCharUuid)   _calibChar       = c;
-          if (uuid == BleConstants.watchDebugCharUuid)       _debugChar       = c;
+          if (uuid == BleConstants.watchDebugTelemetryV2CharUuid)       _debugChar       = c;
         }
         break;
       }
@@ -917,35 +934,34 @@ class WatchService {
       });
     }
 
-    // Debug Telemetry (§5.6) — probe: absent on older firmware. Notify carries
-    // a *change hint*, not the payload: the snapshot is up to 456 bytes and a
-    // notification is truncated to MTU−3. So every notification triggers a full
-    // read, and the initial read on connect seeds the first frame (during
-    // enforcement the watch drops the phone link for each anchor poll, so the
-    // app mostly sees one snapshot per reconnect).
+    // Debug Telemetry v2 (`…001D`, contract §4.1/§4.5) — probe: absent on older
+    // firmware. Notify carries an 8-byte *change hint*, never the payload: the
+    // snapshot is up to 500 bytes over a 23-byte MTU (180-byte header + 10 ×
+    // 32-byte records, contract R7). A hint (or a v2 value the
+    // stack truncated to MTU−3) triggers exactly one guarded full read; the
+    // read's own result comes back through this same listener and decodes.
     if (_debugChar != null) {
       final c = _debugChar!;
       await c.setNotifyValue(true);
-      // flutter_blue_plus's onValueReceived fires for read() results as well
-      // as notifications, so "read on every value" would loop forever. Decode
-      // what arrived instead: a complete value (a read result, or a
-      // notification that fit the MTU) is emitted as is; only a truncated
-      // notification (payload up to 456 B, firmware §5.6) fails to decode, and
-      // that triggers one read whose result returns through this listener.
       _debugSub = c.onValueReceived.listen((bytes) {
+        if (WatchDebugTelemetry.isHint(bytes)) {
+          _readDebugOnce(c);
+          return;
+        }
         try {
-          _debugController.add(WatchDebugTelemetry.decode(bytes)
-              .copyWithReceivedAt(DateTime.now()));
-        } on FormatException {
-          // Re-read only a genuinely truncated v1 value; an unknown
-          // version or malformed value would just fail again.
-          if (_debugReadInFlight || !WatchDebugTelemetry.looksTruncated(bytes)) return;
-          _debugReadInFlight = true;
-          c.read().catchError((_) => <int>[]).whenComplete(
-              () => _debugReadInFlight = false);
+          _debugController.add(WatchDebugTelemetry.decode(bytes));
+        } on FormatException catch (e) {
+          // An unknown version or a structurally impossible header would fail
+          // again on a re-read; only a genuine truncation is worth one.
+          if (!WatchDebugTelemetry.looksTruncated(bytes)) {
+            DebugLogService()
+                .log('debug_telemetry', 'decode failed: $e', bytes);
+            return;
+          }
+          _readDebugOnce(c);
         }
       });
-      // The initial read's value is emitted by the listener above.
+      // Seed the first frame; its value is emitted by the listener above.
       await readDebugTelemetry();
     }
   }

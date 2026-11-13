@@ -1,517 +1,1168 @@
-// Debug Telemetry decoder tests (firmware §5.6 `…001D`, §4.4 `…0020`).
+// Debug Telemetry v2 decoder tests (contract §4.1–§4.4, watch `…001D` and
+// anchor `…0020`).
 //
-// Every payload here is built by hand, field by field, from the spec tables —
-// deliberately NOT by reusing the production encoder (there is none) or the
-// decoder. If a field offset or endianness drifts, these tests fail rather than
-// agreeing with the mistake.
+// Every payload here is built by hand, field by field, from the contract's
+// offset tables — deliberately NOT by reusing an encoder (there is none) or the
+// decoder. If an offset, width or endianness drifts, these tests fail rather
+// than agreeing with the mistake.
 
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:impulse_app/models/debug_telemetry.dart';
 
-/// 16 bytes in printed order for a UUID whose last group is [suffix].
-List<int> _uuid(int suffix) => [
-      ...List<int>.filled(15, 0),
-      suffix & 0xFF,
-    ];
+const int _watchHeader = 180; // R7: 176 + still/motion thresholds
+const int _watchRecord = 32;
+const int _anchorHeader = 160;
+const int _anchorRecord = 24;
 
-class _AnchorRecordFixture {
-  final int rssi;
-  final int sinceSeenS;
-  final int lastScore;
+/// A UUID in printed order: sixteen copies of [fill].
+List<int> _uuid(int fill) => List<int>.filled(16, fill & 0xFF);
+
+/// Little-endian writers. These are the only shared helpers: they encode the
+/// contract's rules (LE, and nothing else), not any field's position.
+class _Bytes {
+  final Uint8List b;
+  _Bytes(int length) : b = Uint8List(length);
+
+  void u8(int off, int v) => b[off] = v & 0xFF;
+
+  void u16(int off, int v) {
+    b[off] = v & 0xFF;
+    b[off + 1] = (v >> 8) & 0xFF;
+  }
+
+  void i16(int off, int v) => u16(off, v & 0xFFFF);
+
+  void u32(int off, int v) {
+    for (int i = 0; i < 4; i++) {
+      b[off + i] = (v >> (8 * i)) & 0xFF;
+    }
+  }
+
+  void raw(int off, List<int> v) {
+    for (int i = 0; i < v.length; i++) {
+      b[off + i] = v[i] & 0xFF;
+    }
+  }
+
+  Uint8List get bytes => b;
+}
+
+class _AnchorRec {
+  final int uuidFill;
+  final int distanceCm;
+  final int ifftCm;
+  final int phaseSlopeCm;
+  final int rttCm;
+  final int ageS;
+  final int sampleCount;
+  final int verdict;
+  final int abstainReason;
   final int flags;
-  final int reserved;
-  const _AnchorRecordFixture({
-    this.rssi = 127,
-    this.sinceSeenS = 0xFFFF,
-    this.lastScore = 0,
-    this.flags = 0,
-    this.reserved = 0,
+  final int quality;
+
+  const _AnchorRec({
+    this.uuidFill = 0x75,
+    this.distanceCm = 142,
+    this.ifftCm = 142,
+    this.phaseSlopeCm = 155,
+    this.rttCm = 190,
+    this.ageS = 2,
+    this.sampleCount = 10,
+    this.verdict = 0,
+    this.abstainReason = 0,
+    this.flags = 0x27,
+    this.quality = 0xFF,
   });
 }
 
-/// Builds a `…001D` payload exactly from the §5.6 table (104-byte header).
+/// Builds a `…001D` payload from the §4.1/§4.2 tables.
 Uint8List _watchPayload({
-  int version = 1,
+  int version = 2,
+  int? headerLen,
+  int? recordLen,
+  int maxRecords = 10,
   int activityState = 3,
-  int flags0 = 0x7F,
-  int flags1 = 0xFF,
-  int utcNow = 1767225600, // 2026-01-01T00:00:00Z
-  int tzOffsetMin = -300,
-  int uptimeMs = 123456,
-  List<int> activeEventId = const [],
-  int criteria = 1,
+  int criteria = 0,
   int profile = 4,
-  int startMin = 6 * 60 + 30,
-  int endMin = 7 * 60 + 15,
-  List<int> eventAnchorId = const [],
-  int beepAnchorCount = 0,
-  int donningGraceS = 300,
-  int graceRemainingS = 0,
-  int stepIdx = 2,
-  int cycleCount = 9,
-  int pollIntervalS = 180,
-  int sinceLastPollS = 42,
+  int flags0 = 0x00,
+  int flags1 = 0x00,
+  int flags2 = 0x00,
+  int flags3 = 0x00,
+  int wornSource = 1,
+  int ringState = 3,
+  int escPendingCmd = 1,
+  int escLastDeliveredCmd = 2,
+  int proxLastResult = 2,
+  int escLastAckResult = 1,
+  int csAbstainReason = 3,
   int lastPollMet = 0,
-  int proxPath = 1,
-  int sinceLastQueryS = 41,
-  int verdictFinal = 1,
-  int verdictV08 = 1,
-  int verdictV2 = 2,
-  int score = 150,
-  int nearThr = 170,
-  int nearThrSource = 1,
-  int scoreFlags = 0x03,
-  int emitQ8 = -512,
-  int lambdaQ8 = -1234,
-  int pNearU8 = 12,
-  int motionState = 0,
-  int pdrRateU8 = 0xFF,
-  int pdrCovered = 4,
-  int pdrLlr = -300,
-  int dock = 0xFF,
-  int gateArmed = 1,
-  int gateHits = 3,
-  int gateArmHits = 5,
-  int gateAdmits = 1,
-  int stillForS = 12,
-  int livenessS = 30,
-  int phoneNearForS = 0,
-  int phoneToleranceS = 120,
-  int farRssiThr = -75,
-  int removedResult = 1,
-  int sinceRemovedS = 7,
-  int ssidMatch = 0xFF,
-  List<_AnchorRecordFixture> anchors = const [],
+  int lastDecision = 7,
+  int nearRun = 2,
+  int awayRun = 1,
+  int abstainRun = 4,
+  int integrityPendingCount = 3,
+  int beepAnchorCount = 2,
+  int csLastQuality = 77,
+  int linkLastDisconnectReason = 0x13,
+  int linkPeerKind = 2,
+  int clockSource = 1,
+  int localMinute = 480,
+  int eventStartMin = 420,
+  int eventEndMin = 510,
+  int nearEnterCm = 200,
+  int awayEnterCm = 350,
+  int donningGraceS = 600,
+  int graceRemainingS = 0,
+  int pollIntervalS = 60,
+  int sinceLastPollS = 12,
+  int sinceLastBurstS = 2,
+  int stillForS = 1450,
+  int wornDiag = 980,
+  int stillThresholdS = 300,
+  int motionThresholdMms2 = 400,
+  int eventIndex = 0,
+  int bootCount = 37,
+  int csBurstCount = 11,
+  int csRejectedRange = 1,
+  int csRejectedQuality = 0,
+  int csSuspectRelay = 0,
+  int csMissingIfft = 0,
+  int csDistanceCm = 142,
+  int csIfftCm = 142,
+  int csPhaseSlopeCm = 155,
+  int csRttCm = 190,
+  int linkConnectAttempts = 3,
+  int linkConnectFailures = 1,
+  int escSinceRequestS = 0xFFFF,
+  int escDeliveredBle = 1,
+  int escDeliveredUdp = 2,
+  int escWifiEntries = 2,
+  int escAttempts = 19,
+  int integritySettleWindowMin = 120,
+  int passAllowance = 4,
+  int passRemaining = 3,
+  int utcNow = 1788091200,
+  int tzOffsetMin = -240,
+  int uptimeMs = 1234567,
+  int linkConnectedAtMs = 1179567,
+  int radioPhaseSinceMs = 1234000,
+  int radioPhaseDwellRemainingS = 42,
+  int radioPhase = 1,
+  List<int> activeEventId = const [],
+  List<int> eventAnchorId = const [],
+  List<int> linkPeerUuid = const [],
+  List<int> linkPeerAddr = const [0xD0, 0x30, 0x2F, 0x4C, 0x7E, 0xC5],
+  int linkPeerAddrType = 1,
+  int snapshotSeq = 42,
+  List<int> ownIpv4 = const [0, 0, 0, 0],
+  List<_AnchorRec> records = const [],
 }) {
-  final b = ByteData(104 + anchors.length * 22);
-  b.setUint8(0, version);
-  b.setUint8(1, activityState);
-  b.setUint8(2, flags0);
-  b.setUint8(3, flags1);
-  b.setUint32(4, utcNow, Endian.little);
-  b.setInt16(8, tzOffsetMin, Endian.little);
-  b.setUint32(10, uptimeMs, Endian.little);
-  for (int i = 0; i < 16; i++) {
-    b.setUint8(14 + i, i < activeEventId.length ? activeEventId[i] : 0);
+  final hdr = headerLen ?? _watchHeader;
+  final rec = recordLen ?? _watchRecord;
+  final d = _Bytes(hdr + records.length * rec);
+  d.u8(0, version);
+  d.u8(1, hdr);
+  d.u8(2, records.length);
+  d.u8(3, rec);
+  d.u8(4, maxRecords);
+  d.u8(5, activityState);
+  d.u8(6, criteria);
+  d.u8(7, profile);
+  d.u8(8, flags0);
+  d.u8(9, flags1);
+  d.u8(10, flags2);
+  d.u8(11, flags3);
+  d.u8(12, wornSource);
+  d.u8(13, ringState);
+  d.u8(14, escPendingCmd);
+  d.u8(15, escLastDeliveredCmd);
+  d.u8(16, proxLastResult);
+  d.u8(17, escLastAckResult);
+  d.u8(18, csAbstainReason);
+  d.u8(19, lastPollMet);
+  d.u8(20, lastDecision);
+  d.u8(21, nearRun);
+  d.u8(22, awayRun);
+  d.u8(23, abstainRun);
+  d.u8(24, integrityPendingCount);
+  d.u8(25, beepAnchorCount);
+  d.u8(26, csLastQuality);
+  d.u8(27, linkLastDisconnectReason);
+  d.u8(28, linkPeerKind);
+  d.u8(29, clockSource); // R7: was reserved0
+  d.u16(30, localMinute);
+  d.u16(32, eventStartMin);
+  d.u16(34, eventEndMin);
+  d.u16(36, nearEnterCm);
+  d.u16(38, awayEnterCm);
+  d.u16(40, donningGraceS);
+  d.u16(42, graceRemainingS);
+  d.u16(44, pollIntervalS);
+  d.u16(46, sinceLastPollS);
+  d.u16(48, sinceLastBurstS);
+  d.u16(50, stillForS);
+  d.i16(52, wornDiag);
+  d.u16(54, eventIndex);
+  d.u16(56, bootCount);
+  d.u16(58, csBurstCount);
+  d.u16(60, csRejectedRange);
+  d.u16(62, csRejectedQuality);
+  d.u16(64, csSuspectRelay);
+  d.u16(66, csMissingIfft);
+  d.u16(68, csDistanceCm);
+  d.u16(70, csIfftCm);
+  d.u16(72, csPhaseSlopeCm);
+  d.u16(74, csRttCm);
+  d.u16(76, linkConnectAttempts);
+  d.u16(78, linkConnectFailures);
+  d.u16(80, escSinceRequestS);
+  d.u16(82, escDeliveredBle);
+  d.u16(84, escDeliveredUdp);
+  d.u16(86, escWifiEntries);
+  d.u16(88, integritySettleWindowMin);
+  d.u8(90, passAllowance);
+  d.u8(91, passRemaining);
+  d.u16(92, escAttempts);
+  d.u32(94, utcNow);
+  d.i16(98, tzOffsetMin);
+  d.u32(100, uptimeMs);
+  d.u32(104, linkConnectedAtMs);
+  d.u32(108, radioPhaseSinceMs);
+  d.u16(112, radioPhaseDwellRemainingS);
+  d.u8(114, radioPhase);
+  d.u8(115, 0); // reserved2
+  d.raw(116, activeEventId.isEmpty
+      ? List<int>.filled(16, 0)
+      : activeEventId);
+  d.raw(132, eventAnchorId.isEmpty
+      ? List<int>.filled(16, 0)
+      : eventAnchorId);
+  d.raw(148, linkPeerUuid.isEmpty
+      ? List<int>.filled(16, 0)
+      : linkPeerUuid);
+  d.raw(164, linkPeerAddr);
+  d.u8(170, linkPeerAddrType);
+  d.u8(171, snapshotSeq);
+  d.raw(172, ownIpv4);
+  if (hdr >= 180) {
+    d.u16(176, stillThresholdS);   // R7
+    d.u16(178, motionThresholdMms2); // R7
   }
-  b.setUint8(30, criteria);
-  b.setUint8(31, profile);
-  b.setUint16(32, startMin, Endian.little);
-  b.setUint16(34, endMin, Endian.little);
-  for (int i = 0; i < 16; i++) {
-    b.setUint8(36 + i, i < eventAnchorId.length ? eventAnchorId[i] : 0);
+  for (int i = 0; i < records.length; i++) {
+    final o = hdr + i * rec;
+    final r = records[i];
+    d.raw(o, _uuid(r.uuidFill));
+    d.u16(o + 16, r.distanceCm);
+    d.u16(o + 18, r.ifftCm);
+    d.u16(o + 20, r.phaseSlopeCm);
+    d.u16(o + 22, r.rttCm);
+    d.u16(o + 24, r.ageS);
+    d.u16(o + 26, r.sampleCount);
+    d.u8(o + 28, r.verdict);
+    d.u8(o + 29, r.abstainReason);
+    d.u8(o + 30, r.flags);
+    d.u8(o + 31, r.quality);
   }
-  b.setUint8(52, beepAnchorCount);
-  b.setUint16(53, donningGraceS, Endian.little);
-  b.setUint16(55, graceRemainingS, Endian.little);
-  b.setUint8(57, stepIdx);
-  b.setUint16(58, cycleCount, Endian.little);
-  b.setUint16(60, pollIntervalS, Endian.little);
-  b.setUint16(62, sinceLastPollS, Endian.little);
-  b.setUint8(64, lastPollMet);
-  b.setUint8(65, proxPath);
-  b.setUint16(66, sinceLastQueryS, Endian.little);
-  b.setUint8(68, verdictFinal);
-  b.setUint8(69, verdictV08);
-  b.setUint8(70, verdictV2);
-  b.setUint8(71, score);
-  b.setUint8(72, nearThr);
-  b.setUint8(73, nearThrSource);
-  b.setUint8(74, scoreFlags);
-  b.setInt16(75, emitQ8, Endian.little);
-  b.setInt16(77, lambdaQ8, Endian.little);
-  b.setUint8(79, pNearU8);
-  b.setUint8(80, motionState);
-  b.setUint8(81, pdrRateU8);
-  b.setUint8(82, pdrCovered);
-  b.setInt16(83, pdrLlr, Endian.little);
-  b.setUint8(85, dock);
-  b.setUint8(86, gateArmed);
-  b.setUint8(87, gateHits);
-  b.setUint8(88, gateArmHits);
-  b.setUint8(89, gateAdmits);
-  b.setUint16(90, stillForS, Endian.little);
-  b.setUint16(92, livenessS, Endian.little);
-  b.setUint16(94, phoneNearForS, Endian.little);
-  b.setUint16(96, phoneToleranceS, Endian.little);
-  b.setInt8(98, farRssiThr);
-  b.setUint8(99, removedResult);
-  b.setUint16(100, sinceRemovedS, Endian.little);
-  b.setUint8(102, ssidMatch);
-  b.setUint8(103, anchors.length);
-  for (int i = 0; i < anchors.length; i++) {
-    final o = 104 + i * 22;
-    final r = anchors[i];
-    for (int j = 0; j < 15; j++) {
-      b.setUint8(o + j, 0);
-    }
-    b.setUint8(o + 15, 0xA0 + i);
-    b.setInt8(o + 16, r.rssi);
-    b.setUint16(o + 17, r.sinceSeenS, Endian.little);
-    b.setUint8(o + 19, r.lastScore);
-    b.setUint8(o + 20, r.flags);
-    b.setUint8(o + 21, r.reserved);
-  }
-  return b.buffer.asUint8List();
+  return d.bytes;
 }
 
-class _EventRecordFixture {
-  final int eventSuffix;
+class _EventRec {
+  final int uuidFill;
   final int startMin;
   final int endMin;
   final int criteria;
-  final int flags;
-  const _EventRecordFixture({
-    this.eventSuffix = 1,
-    this.startMin = 6 * 60 + 30,
-    this.endMin = 7 * 60 + 15,
-    this.criteria = 4,
-    this.flags = 0,
+  final int flags0;
+  final int flags1;
+
+  const _EventRec({
+    this.uuidFill = 0x7D,
+    this.startMin = 420,
+    this.endMin = 510,
+    this.criteria = 0,
+    this.flags0 = 0x00,
+    this.flags1 = 0x00,
   });
 }
 
-/// Builds a `…0020` payload exactly from the §4.4 table (66-byte header).
+/// Builds a `…0020` payload from the §4.3/§4.4 tables.
 Uint8List _anchorPayload({
-  int version = 1,
-  int flags0 = 0xFF,
-  int flags1 = 0x0F,
-  int utcNow = 1767225600,
-  int tzOffsetMin = 330,
-  int uptimeMs = 987654,
-  int localMinute = 6 * 60 + 45,
-  List<int> ip = const [192, 168, 1, 42],
-  int maxBeepMinutes = 30,
-  int todayEventCount = 3,
+  int version = 2,
+  int? headerLen,
+  int? recordLen,
+  int maxRecords = 8,
+  int flags0 = 0x00,
+  int flags1 = 0x00,
+  int flags2 = 0x00,
+  int flags3 = 0x00,
   int beepProfile = 1,
-  List<int> alarmEventId = const [],
+  int lastCmd = 1,
+  int lastCmdResult = 0,
+  int lastCmdReason = 1,
+  int lastCmdTransport = 1,
+  int radioPhase = 0,
+  int csReflectorState = 2,
+  int bootCount = 12,
+  int maxBeepMinutes = 30,
+  int localMinute = 480,
+  int sinceLastCmdS = 12,
   int beepingForS = 12,
-  int dockLastRssi = -72,
-  int dockRssiThr = -60,
-  int undockStreak = 2,
-  int undockConfirm = 3,
-  int lastUdpCmd = 0x01,
-  int lastUdpResult = 7,
-  int sinceLastUdpS = 15,
-  List<int> lastUdpEventId = const [],
-  List<_EventRecordFixture> events = const [],
+  int beepCapRemainingS = 1788,
+  int todayEventCount = 1,
+  int scheduleEventCount = 2,
+  int activeEventIndex = 0,
+  int activeEventStartMin = 420,
+  int activeEventEndMin = 510,
+  int rejectUnknownEvent = 1,
+  int rejectOutsideWindow = 2,
+  int rejectNegated = 3,
+  int rejectNotInBeepList = 4,
+  int rejectMalformed = 5,
+  int acceptedApplied = 6,
+  int capStops = 0,
+  int beepCycles = 7,
+  int wifiDwellRemainingS = 55,
+  int utcNow = 1788091200,
+  int tzOffsetMin = -240,
+  int peerLinkCount = 1,
+  int dockState = 0xFF,
+  int uptimeMs = 7654321,
+  List<int> ownLastIp = const [192, 168, 1, 65],
+  int beepStartedAtMs = 7640000,
+  int radioPhaseSinceMs = 7650000,
+  int scheduleCrc = 0xA1B2C3D4,
+  List<int> activeEventId = const [],
+  List<int> alarmEventId = const [],
+  List<int> lastCmdEventId = const [],
+  List<int> lastCmdWatchUuid = const [],
+  List<int> lastCmdSrcIp = const [0, 0, 0, 0],
+  int identifyActive = 0,
+  int servoState = 0,
+  int clockSource = 1,
+  int ackSent = 0,
+  int activeEventCriteria = 0,
+  int activeEventAnchorProfile = 1,
+  int snapshotSeq = 7,
+  List<_EventRec> records = const [],
 }) {
-  final b = ByteData(66 + events.length * 22);
-  b.setUint8(0, version);
-  b.setUint8(1, flags0);
-  b.setUint8(2, flags1);
-  b.setUint32(3, utcNow, Endian.little);
-  b.setInt16(7, tzOffsetMin, Endian.little);
-  b.setUint32(9, uptimeMs, Endian.little);
-  b.setUint16(13, localMinute, Endian.little);
-  for (int i = 0; i < 4; i++) {
-    b.setUint8(15 + i, ip[i]);
+  final hdr = headerLen ?? _anchorHeader;
+  final rec = recordLen ?? _anchorRecord;
+  final d = _Bytes(hdr + records.length * rec);
+  d.u8(0, version);
+  d.u8(1, hdr);
+  d.u8(2, records.length);
+  d.u8(3, rec);
+  d.u8(4, maxRecords);
+  d.u8(5, flags0);
+  d.u8(6, flags1);
+  d.u8(7, flags2);
+  d.u8(8, flags3);
+  d.u8(9, beepProfile);
+  d.u8(10, lastCmd);
+  d.u8(11, lastCmdResult);
+  d.u8(12, lastCmdReason);
+  d.u8(13, lastCmdTransport);
+  d.u8(14, radioPhase);
+  d.u8(15, csReflectorState);
+  d.u16(16, bootCount);
+  d.u16(18, maxBeepMinutes);
+  d.u16(20, localMinute);
+  d.u16(22, sinceLastCmdS);
+  d.u16(24, beepingForS);
+  d.u16(26, beepCapRemainingS);
+  d.u16(28, todayEventCount);
+  d.u16(30, scheduleEventCount);
+  d.u16(32, activeEventIndex);
+  d.u16(34, activeEventStartMin);
+  d.u16(36, activeEventEndMin);
+  d.u16(38, rejectUnknownEvent);
+  d.u16(40, rejectOutsideWindow);
+  d.u16(42, rejectNegated);
+  d.u16(44, rejectNotInBeepList);
+  d.u16(46, rejectMalformed);
+  d.u16(48, acceptedApplied);
+  d.u16(50, capStops);
+  d.u16(52, beepCycles);
+  d.u16(54, wifiDwellRemainingS);
+  d.u32(56, utcNow);
+  d.i16(60, tzOffsetMin);
+  d.u8(62, peerLinkCount);
+  d.u8(63, dockState);
+  d.u32(64, uptimeMs);
+  d.raw(68, ownLastIp);
+  d.u32(72, beepStartedAtMs);
+  d.u32(76, radioPhaseSinceMs);
+  d.u32(80, scheduleCrc);
+  d.raw(84, activeEventId.isEmpty
+      ? List<int>.filled(16, 0)
+      : activeEventId);
+  d.raw(100, alarmEventId.isEmpty
+      ? List<int>.filled(16, 0)
+      : alarmEventId);
+  d.raw(116, lastCmdEventId.isEmpty
+      ? List<int>.filled(16, 0)
+      : lastCmdEventId);
+  d.raw(132, lastCmdWatchUuid.isEmpty
+      ? List<int>.filled(16, 0)
+      : lastCmdWatchUuid);
+  d.raw(148, lastCmdSrcIp);
+  d.u8(152, identifyActive);
+  d.u8(153, servoState);
+  d.u8(154, clockSource); // R7
+  d.u8(155, ackSent & 0x01); // R7 flags4.b0
+  d.u8(156, activeEventCriteria);
+  d.u8(157, activeEventAnchorProfile);
+  d.u8(158, snapshotSeq);
+  d.u8(159, 0); // reserved1
+  for (int i = 0; i < records.length; i++) {
+    final o = hdr + i * rec;
+    final r = records[i];
+    d.raw(o, _uuid(r.uuidFill));
+    d.u16(o + 16, r.startMin);
+    d.u16(o + 18, r.endMin);
+    d.u8(o + 20, r.criteria);
+    d.u8(o + 21, r.flags0);
+    d.u8(o + 22, r.flags1);
+    d.u8(o + 23, 0); // reserved
   }
-  b.setUint16(19, maxBeepMinutes, Endian.little);
-  b.setUint8(21, todayEventCount);
-  b.setUint8(22, beepProfile);
-  for (int i = 0; i < 16; i++) {
-    b.setUint8(23 + i, i < alarmEventId.length ? alarmEventId[i] : 0);
-  }
-  b.setUint16(39, beepingForS, Endian.little);
-  b.setInt8(41, dockLastRssi);
-  b.setInt8(42, dockRssiThr);
-  b.setUint8(43, undockStreak);
-  b.setUint8(44, undockConfirm);
-  b.setUint8(45, lastUdpCmd);
-  b.setUint8(46, lastUdpResult);
-  b.setUint16(47, sinceLastUdpS, Endian.little);
-  for (int i = 0; i < 16; i++) {
-    b.setUint8(49 + i, i < lastUdpEventId.length ? lastUdpEventId[i] : 0);
-  }
-  b.setUint8(65, events.length);
-  for (int i = 0; i < events.length; i++) {
-    final o = 66 + i * 22;
-    final e = events[i];
-    for (int j = 0; j < 15; j++) {
-      b.setUint8(o + j, 0);
-    }
-    b.setUint8(o + 15, e.eventSuffix);
-    b.setUint16(o + 16, e.startMin, Endian.little);
-    b.setUint16(o + 18, e.endMin, Endian.little);
-    b.setUint8(o + 20, e.criteria);
-    b.setUint8(o + 21, e.flags);
-  }
-  return b.buffer.asUint8List();
+  return d.bytes;
 }
 
 void main() {
-  group('WatchDebugTelemetry.decode', () {
-    test('decodes every header field and an anchor record', () {
+  group('WatchDebugTelemetry v2 header', () {
+    test('decodes every §4.1 field', () {
       final t = WatchDebugTelemetry.decode(_watchPayload(
+        flags0: 0xFF,
+        flags1: 0xFF,
+        flags2: 0xFF,
+        flags3: 0xFF,
         activeEventId: _uuid(0x11),
-        eventAnchorId: _uuid(0x22),
-        beepAnchorCount: 2,
-        anchors: const [
-          _AnchorRecordFixture(
-            rssi: -66,
-            sinceSeenS: 12,
-            lastScore: 150,
-            flags: 0x1F,
-            reserved: 0,
-          ),
-        ],
+        eventAnchorId: _uuid(0x75),
+        linkPeerUuid: _uuid(0x75),
+        escSinceRequestS: 95,
+        ownIpv4: const [192, 168, 1, 152],
+        records: const [_AnchorRec()],
       ));
 
+      expect(t.version, 2);
+      expect(t.headerLen, _watchHeader);
+      expect(t.recordCount, 1);
+      expect(t.recordLen, _watchRecord);
+      expect(t.maxRecords, 10);
+
       expect(t.activityState, DebugActivityState.enforcement);
+      expect(t.criteria, DebugCriteria.getAway);
+      expect(t.profile, WatchProfile.bothNormal);
+      expect(t.profileLabel, contains('buzz+vibrate'));
+
+      // flags0
       expect(t.worn, isTrue);
-      expect(t.btConnected, isTrue);
-      expect(t.wifiConnected, isTrue);
       expect(t.timeValid, isTrue);
       expect(t.graceActive, isTrue);
       expect(t.profileActive, isTrue);
       expect(t.conditionMet, isTrue);
-      expect(t.v0Stub, isFalse);
+      expect(t.verdictHave, isTrue);
+      expect(t.verdictNear, isTrue);
+      expect(t.failsafe, isTrue);
+
+      // flags1
       expect(t.motorOn, isTrue);
-      expect(t.shouldEnforce, isTrue);
-      expect(t.disconnectedIsDormant, isTrue);
-      expect(t.awayIsDormant, isTrue);
-      expect(t.utcNow, 1767225600);
-      expect(t.tzOffsetMin, -300);
-      expect(t.uptimeMs, 123456);
-      expect(t.activeEventId, endsWith('11'));
-      expect(t.criteria, DebugCriteria.stayNear);
-      expect(t.profile, 4);
-      expect(t.startMin, 390);
-      expect(t.endMin, 435);
-      expect(t.eventAnchorId, endsWith('22'));
+      expect(t.buzzerOn, isTrue);
+      expect(t.buzzerCompiledOut, isTrue);
+      expect(t.motorCompiledOut, isTrue);
+      expect(t.outputSilenced, isTrue);
+      expect(t.linkUp, isTrue);
+      expect(t.linkReady, isTrue);
+      expect(t.rangingOn, isTrue);
+
+      // flags2
+      expect(t.wifiOnAir, isTrue);
+      expect(t.bleQuiesced, isTrue);
+      expect(t.escPending, isTrue);
+      expect(t.escGaveUp, isTrue);
+      expect(t.escOnWifi, isTrue);
+      expect(t.wifiConnected, isTrue);
+      expect(t.wifiProvisioned, isTrue);
+      expect(t.ackRefused, isTrue);
+
+      // flags3
+      expect(t.linkPeerKnown, isTrue);
+      expect(t.linkPeerIsEventAnchor, isTrue);
+      expect(t.identityConflict, isTrue);
+      expect(t.verdictFromLostLink, isTrue);
+      expect(t.graceIsLostLink, isTrue);
+      expect(t.hasEventAnchor, isTrue);
+      expect(t.anchorProfilePresent, isTrue);
+      expect(t.wifiCriteria, isTrue);
+
+      expect(t.wornSource, WornSource.imu);
+      expect(t.ringState, RingState.redSolid);
+      expect(t.escPendingCmd, EscalationCmd.watchRemoved);
+      expect(t.escLastDeliveredCmd, EscalationCmd.watchWorn);
+      expect(t.proxLastResult, ProxResult.failProcedure);
+      expect(t.escLastAckResult, EscalationAck.heardNotMine);
+      expect(t.csAbstainReason, CsAbstainReason.failProcedure);
+      expect(t.lastPollMet, PollMet.notMet);
+      expect(t.lastDecision, WatchDecision.getAwayNear);
+
+      expect(t.nearRun, 2);
+      expect(t.awayRun, 1);
+      expect(t.abstainRun, 4);
+      expect(t.integrityPendingCount, 3);
       expect(t.beepAnchorCount, 2);
-      expect(t.donningGraceS, 300);
-      expect(t.cycleCount, 9);
-      expect(t.pollIntervalS, 180);
-      expect(t.sinceLastPollS, 42);
-      expect(t.lastPollMet, 0);
-      expect(t.proxPath, DebugProxPath.score);
-      expect(t.verdictFinal, ProxVerdict.away);
-      expect(t.verdictV08, ProxVerdict.away);
-      expect(t.verdictV2, ProxVerdict.ambiguous);
-      expect(t.score, 150);
-      expect(t.nearThr, 170);
-      expect(t.nearThrSource, 1);
-      expect(t.scoreFlags, 3);
-      expect(t.emitQ8, -512);
-      expect(t.lambdaQ8, -1234);
-      expect(t.pNearU8, 12);
-      expect(t.motionState, DebugMotionState.still);
-      expect(t.pdrAbstained, isTrue);
-      expect(t.pdrCovered, 4);
-      expect(t.pdrLlr, -300);
-      expect(t.dock, 0xFF);
-      expect(t.gateAdmits, isTrue);
-      expect(t.stillForS, 12);
-      expect(t.livenessS, 30);
-      expect(t.phoneToleranceS, 120);
-      expect(t.farRssiThr, -75);
-      expect(t.removedResult, WatchRemovedResult.sentToStoredIp);
-      expect(t.sinceRemovedS, 7);
-      expect(t.ssidMatch, 0xFF);
-      expect(t.ssidMatches, isNull);
-      expect(t.receivedAt, isNull);
+      expect(t.csLastQuality, 77);
+      expect(t.linkLastDisconnectReason, 0x13);
+      expect(t.linkPeerKind, LinkPeerKind.otherAnchor);
+      expect(t.clockSource, ClockSource.flash);
+
+      expect(t.localMinute, 480);
+      expect(t.eventStartMin, 420);
+      expect(t.eventEndMin, 510);
+      expect(t.nearEnterCm, 200);
+      expect(t.awayEnterCm, 350);
+      expect(t.donningGraceS, 600);
+      expect(t.graceRemainingS, 0);
+      expect(t.pollIntervalS, 60);
+      expect(t.sinceLastPollS, 12);
+      expect(t.sinceLastBurstS, 2);
+      expect(t.stillForS, 1450);
+      expect(t.wornDiag, 980);
+      expect(t.stillThresholdS, 300);
+      expect(t.motionThresholdMms2, 400);
+      expect(t.eventIndex, 0);
+      expect(t.bootCount, 37);
+
+      expect(t.csBurstCount, 11);
+      expect(t.csRejectedRange, 1);
+      expect(t.csRejectedQuality, 0);
+      expect(t.csSuspectRelay, 0);
+      expect(t.csMissingIfft, 0);
+      expect(t.csDistanceCm, 142);
+      expect(t.csIfftCm, 142);
+      expect(t.csPhaseSlopeCm, 155);
+      expect(t.csRttCm, 190);
+
+      expect(t.linkConnectAttempts, 3);
+      expect(t.linkConnectFailures, 1);
+      expect(t.escSinceRequestS, 95);
+      expect(t.escDeliveredBle, 1);
+      expect(t.escDeliveredUdp, 2);
+      expect(t.escWifiEntries, 2);
+      expect(t.escAttempts, 19);
+      expect(t.integritySettleWindowMin, 120);
+      expect(t.passAllowance, 4);
+      expect(t.passRemaining, 3);
+
+      expect(t.utcNow, 1788091200);
+      expect(t.tzOffsetMin, -240);
+      expect(t.uptimeMs, 1234567);
+      expect(t.linkConnectedAtMs, 1179567);
+      expect(t.radioPhaseSinceMs, 1234000);
+      expect(t.radioPhaseDwellRemainingS, 42);
+      expect(t.radioPhase, RadioPhase.wifi);
+
+      expect(t.activeEventId, '11111111-1111-1111-1111-111111111111');
+      expect(t.eventAnchorId, '75757575-7575-7575-7575-757575757575');
+      expect(t.linkPeerUuid, t.eventAnchorId);
+      expect(t.linkPeerAddr, 'D0:30:2F:4C:7E:C5');
+      expect(t.linkPeerAddrType, LinkPeerAddrType.randomStatic);
+      expect(t.snapshotSeq, 42);
+      expect(t.ownIpv4, '192.168.1.152');
+      expect(t.hasActiveEvent, isTrue);
+      expect(t.watchLocalTime, isNotNull);
+      expect(t.watchLocalTime!.hour, 8); // 12:00Z − 4 h
 
       expect(t.anchors, hasLength(1));
-      final a = t.anchors.single;
-      expect(a.uuid, endsWith('a0'));
-      expect(a.rssi, -66);
-      expect(a.sinceSeenS, 12);
-      expect(a.lastScore, 150);
-      expect(a.bleMacValid, isTrue);
-      expect(a.ipKnown, isTrue);
-      expect(a.isEventAnchor, isTrue);
-      expect(a.inBeepList, isTrue);
-      expect(a.rssiFresh, isTrue);
-      expect(a.reserved, 0);
+      final r = t.anchors.single;
+      expect(r.anchorUuid, '75757575-7575-7575-7575-757575757575');
+      expect(r.distanceCm, 142);
+      expect(r.distanceM, closeTo(1.42, 1e-9));
+      expect(r.distanceLabel, '1.42 m');
+      expect(r.ifftCm, 142);
+      expect(r.phaseSlopeCm, 155);
+      expect(r.rttCm, 190);
+      expect(r.ageS, 2);
+      expect(r.sampleCount, 10);
+      expect(r.verdict, ProxVerdict.near);
+      expect(r.abstainReason, CsAbstainReason.ok);
+      expect(r.isEventAnchor, isTrue);
+      expect(r.inBeepList, isTrue);
+      expect(r.isLinkPeer, isTrue);
+      expect(r.identityConflict, isFalse);
+      expect(r.ipKnown, isFalse);
+      expect(r.ranged, isTrue);
+      expect(r.quality, isNull);
+      expect(t.liveRangedRecord, same(r));
     });
 
-    test('0 records and max 16 records', () {
-      final zero = WatchDebugTelemetry.decode(_watchPayload());
-      expect(zero.anchors, isEmpty);
-
-      final max = WatchDebugTelemetry.decode(_watchPayload(
-        anchors: List.generate(
-          16,
-          (i) => _AnchorRecordFixture(rssi: -40 - i, sinceSeenS: i),
-        ),
-      ));
-      expect(max.anchors, hasLength(16));
-      expect(max.anchors.last.rssi, -55);
-      expect(max.anchors.last.sinceSeenS, 15);
-    });
-
-    test('unknown version is rejected', () {
-      expect(
-        () => WatchDebugTelemetry.decode(_watchPayload(version: 2)),
-        throwsFormatException,
-      );
-    });
-
-    test('short header is rejected', () {
-      final bytes = _watchPayload().sublist(0, 103);
-      expect(() => WatchDebugTelemetry.decode(bytes), throwsFormatException);
-    });
-
-    test('truncated declared records are rejected', () {
-      // Claims one 22-byte record, supplies only the header.
-      final bytes = _watchPayload(anchors: const [_AnchorRecordFixture()])
-          .sublist(0, 104);
-      expect(() => WatchDebugTelemetry.decode(bytes), throwsFormatException);
-    });
-
-    test('trailing bytes are ignored', () {
-      final bytes = <int>[
-        ..._watchPayload(score: 77),
-        0xDE, 0xAD, 0xBE, 0xEF,
-      ];
-      final t = WatchDebugTelemetry.decode(bytes);
-      expect(t.score, 77);
+    test('all-zero flag bytes decode as all-false', () {
+      final t = WatchDebugTelemetry.decode(_watchPayload());
+      expect(t.worn || t.timeValid || t.graceActive || t.conditionMet, isFalse);
+      expect(t.motorOn || t.buzzerOn || t.linkUp || t.rangingOn, isFalse);
+      expect(t.wifiConnected || t.escPending || t.ackRefused, isFalse);
+      expect(t.identityConflict || t.hasEventAnchor, isFalse);
       expect(t.anchors, isEmpty);
     });
 
-    test('copyWithReceivedAt attaches a timestamp without changing data', () {
-      final t = WatchDebugTelemetry.decode(_watchPayload(score: 99));
-      final at = DateTime.utc(2026, 1, 2, 3, 4, 5);
-      final stamped = t.copyWithReceivedAt(at);
-      expect(stamped.receivedAt, at);
-      expect(stamped.score, 99);
-      expect(stamped.anchors.length, t.anchors.length);
+    test('record_count 0 and the 10-record maximum', () {
+      expect(WatchDebugTelemetry.decode(_watchPayload()).anchors, isEmpty);
+
+      final max = WatchDebugTelemetry.decode(_watchPayload(
+        records: [
+          for (int i = 0; i < 10; i++)
+            _AnchorRec(uuidFill: 0x10 + i, distanceCm: 100 + i),
+        ],
+      ));
+      expect(max.anchors, hasLength(10));
+      expect(max.anchors.last.anchorUuid, startsWith('19191919'));
+      expect(max.anchors.last.distanceCm, 109);
     });
 
-    test('criteria 0xFF and zero event UUID decode as no active event', () {
-      final t = WatchDebugTelemetry.decode(_watchPayload(criteria: 0xFF));
-      expect(t.criteria, isNull);
-      expect(t.hasActiveEvent, isFalse);
-      expect(t.activeEventId, isEmpty);
+    test('records are found from header_len and record_len, not constants',
+        () {
+      // Widen the header by 4 bytes; the record must move with it.
+      final base = _watchPayload(records: const [_AnchorRec(distanceCm: 321)]);
+      final padded = <int>[
+        ...base.sublist(0, _watchHeader),
+        0xAA, 0xBB, 0xCC, 0xDD,
+        ...base.sublist(_watchHeader),
+      ]..[1] = _watchHeader + 4;
+      final t = WatchDebugTelemetry.decode(padded);
+      expect(t.headerLen, _watchHeader + 4);
+      expect(t.anchors.single.distanceCm, 321);
     });
 
-    test('localMinute applies the tz offset and 0xFFFF means invalid', () {
-      // 1767225600 = 2026-01-01 00:00 UTC; -300 min ⇒ 19:00 the previous day.
-      final t = WatchDebugTelemetry.decode(_watchPayload(tzOffsetMin: -300));
-      expect(t.localMinute, 19 * 60);
-      final invalid = WatchDebugTelemetry.decode(_watchPayload(flags0: 0));
-      expect(invalid.timeValid, isFalse);
-      expect(invalid.localMinute, 0xFFFF);
-      expect(invalid.watchLocalTime, isNull);
+    test('trailing bytes past the last record are ignored', () {
+      final bytes = <int>[
+        ..._watchPayload(records: const [_AnchorRec(distanceCm: 99)]),
+        0xDE, 0xAD, 0xBE, 0xEF,
+      ];
+      final t = WatchDebugTelemetry.decode(bytes);
+      expect(t.anchors.single.distanceCm, 99);
     });
   });
 
-  group('AnchorDebugTelemetry.decode', () {
-    test('decodes header, network-order IPv4 and event records', () {
+  group('WatchDebugTelemetry v2 sentinels and enums', () {
+    test('0xFFFF names, 0xFFFFFFFF timestamps and 0xFF bytes map to null', () {
+      final t = WatchDebugTelemetry.decode(_watchPayload(
+        criteria: 0xFF,
+        profile: 0xFF,
+        ringState: 0xFF,
+        proxLastResult: 0xFF,
+        escLastAckResult: 0xFF,
+        csAbstainReason: 0xFF,
+        lastPollMet: 0xFF,
+        lastDecision: 0xFF,
+        csLastQuality: 0xFF,
+        linkLastDisconnectReason: 0xFF,
+        localMinute: 0xFFFF,
+        eventStartMin: 0xFFFF,
+        eventEndMin: 0xFFFF,
+        sinceLastPollS: 0xFFFF,
+        sinceLastBurstS: 0xFFFF,
+        stillForS: 0xFFFF,
+        wornDiag: 0x7FFF,
+        eventIndex: 0xFFFF,
+        csDistanceCm: 0xFFFF,
+        csIfftCm: 0xFFFF,
+        csPhaseSlopeCm: 0xFFFF,
+        csRttCm: 0xFFFF,
+        escSinceRequestS: 0xFFFF,
+        utcNow: 0xFFFFFFFF,
+        linkConnectedAtMs: 0xFFFFFFFF,
+        radioPhaseSinceMs: 0xFFFFFFFF,
+        linkPeerAddr: const [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF],
+        linkPeerAddrType: 0xFF,
+        clockSource: 0xFF,
+        stillThresholdS: 0,
+        motionThresholdMms2: 0,
+      ));
+      expect(t.criteria, isNull);
+      expect(t.profile, isNull);
+      expect(t.profileLabel, 'none');
+      expect(t.ringState, isNull);
+      expect(t.proxLastResult, isNull);
+      expect(t.escLastAckResult, isNull);
+      expect(t.csAbstainReason, isNull);
+      expect(t.lastPollMet, isNull);
+      expect(t.lastDecision, isNull);
+      expect(t.csLastQuality, isNull);
+      expect(t.linkLastDisconnectReason, isNull);
+      expect(t.localMinute, isNull);
+      expect(t.eventStartMin, isNull);
+      expect(t.eventEndMin, isNull);
+      expect(t.sinceLastPollS, isNull);
+      expect(t.sinceLastBurstS, isNull);
+      expect(t.stillForS, isNull);
+      expect(t.wornDiag, isNull);
+      expect(t.eventIndex, isNull);
+      expect(t.csDistanceCm, isNull);
+      expect(t.csIfftCm, isNull);
+      expect(t.csPhaseSlopeCm, isNull);
+      expect(t.csRttCm, isNull);
+      expect(t.escSinceRequestS, isNull);
+      expect(t.utcNow, isNull);
+      expect(t.linkConnectedAtMs, isNull);
+      expect(t.radioPhaseSinceMs, isNull);
+      expect(t.linkPeerAddr, isNull);
+      expect(t.linkPeerAddrType, isNull);
+      expect(t.clockSource, isNull);
+      expect(t.stillThresholdS, isNull);
+      expect(t.motionThresholdMms2, isNull);
+      expect(t.watchLocalTime, isNull);
+      expect(t.hasActiveEvent, isFalse);
+    });
+
+    test('all-zero UUIDs and 0.0.0.0 map to empty/none', () {
+      final t = WatchDebugTelemetry.decode(_watchPayload());
+      expect(t.activeEventId, isEmpty);
+      expect(t.eventAnchorId, isEmpty);
+      expect(t.linkPeerUuid, isEmpty);
+      expect(t.ownIpv4, isNull);
+    });
+
+    test('a value outside an enum becomes unknown(raw), not a guess', () {
+      final t = WatchDebugTelemetry.decode(_watchPayload(
+        criteria: 9,
+        lastDecision: 40,
+        linkPeerKind: 6,
+        wornSource: 4,
+        radioPhase: 3,
+        clockSource: 9,
+      ));
+      expect(t.criteria, isNotNull);
+      expect(t.criteria!.known, isFalse);
+      expect(t.criteria!.raw, 9);
+      expect(t.criteria!.label, 'UNKNOWN');
+      expect(t.lastDecision!.known, isFalse);
+      expect(t.lastDecision!.raw, 40);
+      expect(t.lastDecision!.met, isNull);
+      expect(t.linkPeerKind.known, isFalse);
+      expect(t.linkPeerKind.raw, 6);
+      expect(t.wornSource.known, isFalse);
+      expect(t.radioPhase.known, isFalse);
+      expect(t.clockSource!.known, isFalse);
+      expect(t.clockSource!.raw, 9);
+    });
+
+    test('record verdict 0xFF is NOT_RANGED and its reason 0xFE is not an enum',
+        () {
+      final t = WatchDebugTelemetry.decode(_watchPayload(records: const [
+        _AnchorRec(
+          distanceCm: 0xFFFF,
+          ifftCm: 0xFFFF,
+          phaseSlopeCm: 0xFFFF,
+          rttCm: 0xFFFF,
+          ageS: 0xFFFF,
+          sampleCount: 0,
+          verdict: 0xFF,
+          abstainReason: 0xFE,
+          flags: 0x02,
+          quality: 0xFF,
+        ),
+      ]));
+      final r = t.anchors.single;
+      expect(r.verdict, ProxVerdict.notRanged);
+      expect(r.verdict.ranged, isFalse);
+      expect(r.distanceCm, isNull);
+      expect(r.distanceLabel, 'not ranged');
+      expect(r.ageS, isNull);
+      expect(r.abstainReason, isNull);
+      expect(r.inBeepList, isTrue);
+      expect(r.isLinkPeer, isFalse);
+      expect(t.liveRangedRecord, isNull);
+    });
+
+    test('decisions carry their own met/unmet answer', () {
+      expect(WatchDecision.getAwayNear.met, isFalse);
+      expect(WatchDecision.getAwayAway.met, isTrue);
+      expect(WatchDecision.getAwayAbstain.met, isTrue);
+      expect(WatchDecision.stayNearAbstain.met, isFalse);
+      expect(WatchDecision.phoneAwayUnmet.met, isFalse);
+      expect(WatchDecision.notEvaluated.met, isNull);
+      expect(WatchDecision.lostLinkAway.met, isNull);
+    });
+  });
+
+  group('WatchDebugTelemetry v2 rejection', () {
+    test('an unknown version is a clear error, never garbage', () {
+      expect(
+        () => WatchDebugTelemetry.decode(_watchPayload(version: 1)),
+        throwsA(isA<FormatException>().having(
+            (e) => e.message, 'message', 'unsupported telemetry version 1')),
+      );
+      expect(
+        () => WatchDebugTelemetry.decode(_watchPayload(version: 3)),
+        throwsA(isA<FormatException>().having(
+            (e) => e.message, 'message', 'unsupported telemetry version 3')),
+      );
+    });
+
+    test('short and structurally impossible payloads are rejected', () {
+      expect(() => WatchDebugTelemetry.decode(const []), throwsFormatException);
+      expect(
+          () => WatchDebugTelemetry.decode(const [2, 176, 0]), throwsFormatException);
+      expect(
+          () => WatchDebugTelemetry.decode(_watchPayload().sublist(0, 175)),
+          throwsFormatException);
+      expect(
+        () => WatchDebugTelemetry.decode(
+            Uint8List.fromList(_watchPayload())..[1] = 100),
+        throwsFormatException,
+        reason: 'header_len smaller than the v2 header cannot be decoded',
+      );
+      expect(
+        () => WatchDebugTelemetry.decode(
+            _watchPayload(records: const [_AnchorRec()]).sublist(0, 176)),
+        throwsFormatException,
+        reason: 'declares a record it does not carry',
+      );
+      expect(
+        () => WatchDebugTelemetry.decode(
+            Uint8List.fromList(_watchPayload(records: const [_AnchorRec()]))
+              ..[3] = 8),
+        throwsFormatException,
+        reason: 'record_len narrower than the v2 record cannot be decoded',
+      );
+      expect(
+        () => WatchDebugTelemetry.decode(_watchPayload(
+            records: [for (int i = 0; i < 11; i++) const _AnchorRec()])),
+        throwsFormatException,
+        reason: 'record_count above max_records',
+      );
+    });
+  });
+
+  group('AnchorDebugTelemetry v2 header', () {
+    test('decodes every §4.3 field', () {
       final t = AnchorDebugTelemetry.decode(_anchorPayload(
-        alarmEventId: _uuid(0x33),
-        lastUdpEventId: _uuid(0x44),
-        events: const [
-          _EventRecordFixture(eventSuffix: 1, flags: 0x1F),
-          _EventRecordFixture(
-              eventSuffix: 2, criteria: 0, flags: 0x00, startMin: 0,
-              endMin: 1440),
-        ],
+        flags0: 0xFF,
+        flags1: 0xFF,
+        flags2: 0xFF,
+        flags3: 0xFF,
+        activeEventId: _uuid(0x7D),
+        alarmEventId: _uuid(0x7D),
+        lastCmdEventId: _uuid(0x7D),
+        lastCmdWatchUuid: _uuid(0x3F),
+        lastCmdSrcIp: const [192, 168, 1, 7],
+        records: const [_EventRec(
+          flags0: 0x1A, flags1: 0x05, criteria: 0, endMin: 510)],
       ));
 
-      expect(t.wifiConnected, isTrue);
+      expect(t.version, 2);
+      expect(t.headerLen, _anchorHeader);
+      expect(t.recordCount, 1);
+      expect(t.recordLen, _anchorRecord);
+      expect(t.maxRecords, 8);
+
       expect(t.timeValid, isTrue);
       expect(t.scheduleLoaded, isTrue);
       expect(t.beeping, isTrue);
       expect(t.beepPhaseOn, isTrue);
-      expect(t.dockAlarm, isTrue);
-      expect(t.identifyActive, isTrue);
-      expect(t.docked, isTrue);
-      expect(t.dockPhoneConnected, isTrue);
-      expect(t.dockSeenThisWindow, isTrue);
-      expect(t.advUndocked, isTrue);
-      expect(t.debugMode, isTrue);
-      expect(t.utcNow, 1767225600);
-      expect(t.tzOffsetMin, 330);
-      expect(t.uptimeMs, 987654);
-      expect(t.localMinute, 405);
-      expect(t.ip, '192.168.1.42');
-      expect(t.ipKnown, isTrue);
+      expect(t.buzzerCompiledOut, isTrue);
+      expect(t.motorCompiledOut, isTrue);
+      expect(t.wifiConnected, isTrue);
+      expect(t.wifiFallbackArmed, isTrue);
+
+      expect(t.bleQuiesced, isTrue);
+      expect(t.bleAdvertising, isTrue);
+      expect(t.radioIsWifi, isTrue);
+      expect(t.servoOpen, isTrue);
+      expect(t.dockSupported, isTrue);
+      expect(t.clockRestored, isTrue);
+      expect(t.beepCapReached, isTrue);
+      expect(t.anchorInActiveEvent, isTrue);
+
+      expect(t.lastCmdRemoved, isTrue);
+      expect(t.lastCmdWorn, isTrue);
+      expect(t.lastCmdAccepted, isTrue);
+      expect(t.lastCmdNotMine, isTrue);
+      expect(t.lastCmdMalformed, isTrue);
+      expect(t.lastCmdOverBle, isTrue);
+      expect(t.lastCmdOverUdp, isTrue);
+      expect(t.noCommandYet, isTrue);
+
+      expect(t.identifyActiveFlag, isTrue);
+      expect(t.csReflectorBuilt, isTrue);
+      expect(t.csProceduresActive, isTrue);
+      expect(t.schedulePersisted, isTrue);
+      expect(t.rejectionWasClock, isTrue);
+      expect(t.profileDefaulted, isTrue);
+      expect(t.alarmWindowClosed, isTrue);
+
+      expect(t.beepProfile, BeepProfile.medium);
+      expect(t.lastCmd, AnchorCmd.watchRemoved);
+      expect(t.lastCmdResult, AnchorCmdResult.applied);
+      expect(t.lastCmdReason, AnchorCmdReason.started);
+      expect(t.lastCmdTransport, AnchorCmdTransport.ble);
+      expect(t.radioPhase, RadioPhase.ble);
+      expect(t.csReflectorState, CsReflectorState.procedures);
+
+      expect(t.bootCount, 12);
       expect(t.maxBeepMinutes, 30);
-      expect(t.todayEventCount, 3);
-      expect(t.beepProfile, 1);
-      expect(t.beepProfileLabel, 'medium');
-      expect(t.alarmEventId, endsWith('33'));
+      expect(t.localMinute, 480);
+      expect(t.sinceLastCmdS, 12);
       expect(t.beepingForS, 12);
-      expect(t.dockLastRssi, -72);
-      expect(t.dockRssiThr, -60);
-      expect(t.undockStreak, 2);
-      expect(t.undockConfirm, 3);
-      expect(t.lastUdpCmd, 0x01);
-      expect(t.lastUdpCmdLabel, 'WATCH_REMOVED');
-      expect(t.lastUdpResult, AnchorUdpResult.rejectedOutsideWindow);
-      expect(t.lastUdpResult.label, contains('outside window'));
-      expect(t.sinceLastUdpS, 15);
-      expect(t.lastUdpEventId, endsWith('44'));
-      expect(t.receivedAt, isNull);
+      expect(t.beepCapRemainingS, 1788);
+      expect(t.todayEventCount, 1);
+      expect(t.scheduleEventCount, 2);
+      expect(t.activeEventIndex, 0);
+      expect(t.activeEventStartMin, 420);
+      expect(t.activeEventEndMin, 510);
 
-      expect(t.relevantEvents, hasLength(2));
-      final first = t.relevantEvents.first;
-      expect(first.eventId, endsWith('01'));
-      expect(first.startMin, 390);
-      expect(first.endMin, 435);
-      expect(first.criteria, DebugCriteria.phoneAway);
-      expect(first.negatedToday, isTrue);
-      expect(first.inBeepList, isTrue);
-      expect(first.isDockEvent, isTrue);
-      expect(first.hasAnchorProfile, isTrue);
-      expect(first.windowOpenNow, isTrue);
-      expect(t.dockEventRecord('x'), isNotNull);
+      expect(t.rejectUnknownEvent, 1);
+      expect(t.rejectOutsideWindow, 2);
+      expect(t.rejectNegated, 3);
+      expect(t.rejectNotInBeepList, 4);
+      expect(t.rejectMalformed, 5);
+      expect(t.acceptedApplied, 6);
+      expect(t.capStops, 0);
+      expect(t.beepCycles, 7);
+      expect(t.wifiDwellRemainingS, 55);
+
+      expect(t.utcNow, 1788091200);
+      expect(t.tzOffsetMin, -240);
+      expect(t.peerLinkCount, 1);
+      expect(t.dockState, isNull); // 0xFF = not supported
+      expect(t.uptimeMs, 7654321);
+      expect(t.ownLastIp, '192.168.1.65');
+      expect(t.beepStartedAtMs, 7640000);
+      expect(t.radioPhaseSinceMs, 7650000);
+      expect(t.scheduleCrc, 0xA1B2C3D4);
+      expect(t.activeEventId, '7d7d7d7d-7d7d-7d7d-7d7d-7d7d7d7d7d7d');
+      expect(t.alarmEventId, t.activeEventId);
+      expect(t.lastCmdEventId, t.activeEventId);
+      expect(t.lastCmdWatchUuid, '3f3f3f3f-3f3f-3f3f-3f3f-3f3f3f3f3f3f');
+      expect(t.lastCmdSrcIp, '192.168.1.7');
+      expect(t.identifyActive, 0);
+      expect(t.servoState, ServoState.closed);
+      expect(t.clockSource, ClockSource.flash);
+      expect(t.ackSent, isFalse);
+      expect(t.activeEventCriteria, DebugCriteria.getAway);
+      expect(t.activeEventAnchorProfile, BeepProfile.medium);
+      expect(t.snapshotSeq, 7);
+      expect(t.anchorLocalTime, isNotNull);
+      expect(t.clockSourceLabel, contains('restored'));
+      expect(t.beepCapExpired, isTrue, reason: 'beep_cap_reached is set');
+
+      expect(t.events, hasLength(1));
+      final e = t.events.single;
+      expect(e.eventId, '7d7d7d7d-7d7d-7d7d-7d7d-7d7d7d7d7d7d');
+      expect(e.startMin, 420);
+      expect(e.endMin, 510);
+      expect(e.criteria, DebugCriteria.getAway);
+      expect(e.negatedToday, isFalse); // flags0 0x1A
+      expect(e.inBeepList, isTrue);
+      expect(e.isDockEvent, isFalse);
+      expect(e.hasAnchorProfile, isTrue);
+      expect(e.windowOpenNow, isTrue);
+      expect(e.isAnchorIdTarget, isFalse);
+      expect(e.clockInvalid, isFalse);
+      expect(e.beepListNonempty, isFalse);
+      expect(e.recurrence, Recurrence.daily); // flags1 0x05 → bits 0-1 = 1
+      expect(e.supportedCriteria, isTrue);
+      expect(e.activeAlarmEvent, isFalse);
     });
 
-    test('0 and max 8 event records', () {
-      expect(AnchorDebugTelemetry.decode(_anchorPayload()).relevantEvents,
-          isEmpty);
+    test('record flags decode one bit each', () {
+      final t = AnchorDebugTelemetry.decode(_anchorPayload(records: const [
+        _EventRec(flags0: 0xFF),
+      ]));
+      final e = t.events.single;
+      expect(e.negatedToday, isTrue);
+      expect(e.inBeepList, isTrue);
+      expect(e.isDockEvent, isTrue);
+      expect(e.hasAnchorProfile, isTrue);
+      expect(e.windowOpenNow, isTrue);
+      expect(e.isAnchorIdTarget, isTrue);
+      expect(e.clockInvalid, isTrue);
+      expect(e.beepListNonempty, isTrue);
+    });
+
+    test('0 records and the 8-record maximum', () {
+      expect(AnchorDebugTelemetry.decode(_anchorPayload()).events, isEmpty);
       final max = AnchorDebugTelemetry.decode(_anchorPayload(
-        events: List.generate(
-          8,
-          (i) => _EventRecordFixture(eventSuffix: i + 1),
-        ),
+        records: [
+          for (int i = 0; i < 8; i++)
+            _EventRec(uuidFill: 0x40 + i, startMin: i * 60),
+        ],
       ));
-      expect(max.relevantEvents, hasLength(8));
-      expect(max.relevantEvents.last.eventId, endsWith('08'));
+      expect(max.events, hasLength(8));
+      expect(max.events.last.startMin, 420);
     });
 
-    test('unknown version and short payloads are rejected', () {
-      expect(() => AnchorDebugTelemetry.decode(_anchorPayload(version: 9)),
+    test('records are found from header_len', () {
+      final base = _anchorPayload(records: const [_EventRec(startMin: 77)]);
+      final padded = <int>[
+        ...base.sublist(0, _anchorHeader),
+        0x01, 0x02,
+        ...base.sublist(_anchorHeader),
+      ]..[1] = _anchorHeader + 2;
+      final t = AnchorDebugTelemetry.decode(padded);
+      expect(t.events.single.startMin, 77);
+    });
+  });
+
+  group('AnchorDebugTelemetry v2 sentinels and rejection', () {
+    test('sentinels map to null', () {
+      final t = AnchorDebugTelemetry.decode(_anchorPayload(
+        beepProfile: 0xFF,
+        lastCmdResult: 0xFF,
+        lastCmdReason: 0xFF,
+        lastCmdTransport: 0xFF,
+        csReflectorState: 0xFF,
+        localMinute: 0xFFFF,
+        sinceLastCmdS: 0xFFFF,
+        activeEventIndex: 0xFFFF,
+        activeEventStartMin: 0xFFFF,
+        activeEventEndMin: 0xFFFF,
+        utcNow: 0xFFFFFFFF,
+        ownLastIp: const [0, 0, 0, 0],
+        beepStartedAtMs: 0,
+        scheduleCrc: 0,
+        activeEventCriteria: 0xFF,
+        activeEventAnchorProfile: 0xFF,
+        servoState: 0xFF,
+        clockSource: 0xFF,
+        lastCmdSrcIp: const [0, 0, 0, 0],
+      ));
+      expect(t.beepProfile, isNull);
+      expect(t.lastCmdResult, isNull);
+      expect(t.lastCmdReason, isNull);
+      expect(t.lastCmdTransport, isNull);
+      expect(t.csReflectorState, isNull);
+      expect(t.localMinute, isNull);
+      expect(t.sinceLastCmdS, isNull);
+      expect(t.activeEventIndex, isNull);
+      expect(t.activeEventStartMin, isNull);
+      expect(t.activeEventEndMin, isNull);
+      expect(t.utcNow, isNull);
+      expect(t.ownLastIp, isNull);
+      expect(t.beepStartedAtMs, isNull);
+      expect(t.scheduleCrc, isNull);
+      expect(t.activeEventCriteria, isNull);
+      expect(t.activeEventAnchorProfile, isNull);
+      expect(t.servoState, isNull);
+      expect(t.clockSource, isNull);
+      expect(t.lastCmdSrcIp, isNull);
+      expect(t.anchorLocalTime, isNull);
+      expect(t.clockSourceLabel, contains('invalid'));
+    });
+
+    test('an unknown version is a clear error', () {
+      expect(
+        () => AnchorDebugTelemetry.decode(_anchorPayload(version: 1)),
+        throwsA(isA<FormatException>().having(
+            (e) => e.message, 'message', 'unsupported telemetry version 1')),
+      );
+    });
+
+    test('short and impossible payloads are rejected', () {
+      expect(() => AnchorDebugTelemetry.decode(const []), throwsFormatException);
+      expect(
+          () => AnchorDebugTelemetry.decode(_anchorPayload().sublist(0, 159)),
           throwsFormatException);
       expect(
-        () => AnchorDebugTelemetry.decode(_anchorPayload().sublist(0, 65)),
+          () => AnchorDebugTelemetry.decode(
+              Uint8List.fromList(_anchorPayload())..[1] = 40),
+          throwsFormatException);
+      expect(
+        () => AnchorDebugTelemetry.decode(
+            _anchorPayload(records: const [_EventRec()]).sublist(0, 160)),
         throwsFormatException,
       );
       expect(
         () => AnchorDebugTelemetry.decode(
-            _anchorPayload(events: const [_EventRecordFixture()])
-                .sublist(0, 66)),
+            Uint8List.fromList(_anchorPayload(records: const [_EventRec()]))
+              ..[3] = 12),
+        throwsFormatException,
+      );
+      expect(
+        () => AnchorDebugTelemetry.decode(_anchorPayload(
+            records: [for (int i = 0; i < 9; i++) const _EventRec()])),
         throwsFormatException,
       );
     });
+  });
 
-    test('trailing bytes are ignored; 0.0.0.0 means no IP', () {
-      final bytes = <int>[..._anchorPayload(ip: const [0, 0, 0, 0]), 1, 2];
-      final t = AnchorDebugTelemetry.decode(bytes);
-      expect(t.ip, isNull);
-      expect(t.ipKnown, isFalse);
-      expect(t.relevantEvents, isEmpty);
+  group('hint and truncation handling', () {
+    test('the 8-byte §4.5 hint is recognised and is not a payload', () {
+      final hint = <int>[2, 42, 0x04, 0x00, 0x00, 0x1B, 0x1B, 0x6A];
+      expect(WatchDebugTelemetry.isHint(hint), isTrue);
+      expect(AnchorDebugTelemetry.isHint(hint), isTrue);
+      expect(() => WatchDebugTelemetry.decode(hint), throwsFormatException);
+      expect(WatchDebugTelemetry.looksTruncated(hint), isTrue,
+          reason: 'a hint is always worth one full read');
+
+      expect(WatchDebugTelemetry.isHint([3, 1, 2, 3, 4, 5, 6, 7]), isFalse);
+      expect(WatchDebugTelemetry.isHint([2, 1, 2]), isFalse);
+      expect(WatchDebugTelemetry.isHint(const []), isFalse);
     });
 
-    test('local_minute 0xFFFF and beep cap', () {
-      final t = AnchorDebugTelemetry.decode(
-          _anchorPayload(localMinute: 0xFFFF, beepingForS: 1800));
-      expect(t.localMinute, 0xFFFF);
-      expect(t.beepCapExpired, isTrue);
-    });
+    test('looksTruncated uses the v2 header, and rejects other versions', () {
+      final full = _watchPayload(records: const [_AnchorRec()]);
+      expect(WatchDebugTelemetry.looksTruncated(full), isFalse);
+      expect(WatchDebugTelemetry.looksTruncated(full.sublist(0, 100)), isTrue);
+      expect(WatchDebugTelemetry.looksTruncated(full.sublist(0, 180)), isTrue);
+      expect(WatchDebugTelemetry.looksTruncated(const [2, 176]), isTrue);
+      expect(WatchDebugTelemetry.looksTruncated(const []), isFalse);
+      expect(
+        WatchDebugTelemetry.looksTruncated([3, ...full.skip(1)]),
+        isFalse,
+        reason: 'an unknown version would fail again on a re-read',
+      );
 
-    test('copyWithReceivedAt attaches a timestamp without changing data', () {
-      final t = AnchorDebugTelemetry.decode(_anchorPayload());
-      final at = DateTime.utc(2026, 1, 2, 3, 4, 5);
-      final stamped = t.copyWithReceivedAt(at);
-      expect(stamped.receivedAt, at);
-      expect(stamped.utcNow, t.utcNow);
-      expect(stamped.relevantEvents.length, t.relevantEvents.length);
+      final anchor = _anchorPayload(
+          records: const [_EventRec(), _EventRec(uuidFill: 0x41)]);
+      expect(AnchorDebugTelemetry.looksTruncated(anchor), isFalse);
+      expect(
+          AnchorDebugTelemetry.looksTruncated(anchor.sublist(0, 170)), isTrue);
+      expect(AnchorDebugTelemetry.looksTruncated([1, ...anchor.skip(1)]),
+          isFalse);
+    });
+  });
+
+  group('fieldsMap', () {
+    test('exposes the §4 names the cross-language vector file uses', () {
+      final w = WatchDebugTelemetry.decode(_watchPayload(
+        records: const [_AnchorRec()],
+        activeEventId: _uuid(0x11),
+        ownIpv4: const [10, 0, 0, 2],
+      ));
+      final f = w.fieldsMap();
+      expect(f['version'], 2);
+      expect(f['header_len'], 180);
+      expect(f['record_count'], 1);
+      expect(f['activity_state'], 3);
+      expect(f['criteria'], 0);
+      expect(f['near_enter_cm'], 200);
+      expect(f['utc_now'], 1788091200);
+      expect(f['own_ipv4'], '10.0.0.2');
+      expect(f['active_event_id'], '11111111-1111-1111-1111-111111111111');
+      expect(f['link_peer_addr'], 'D0:30:2F:4C:7E:C5');
+      expect(f['worn'], isFalse);
+      expect(f['time_valid'], isFalse);
+      expect(f['flags0'], 0);
+
+      final r = w.anchors.single.toRecordMap();
+      expect(r['anchor_uuid'], '75757575-7575-7575-7575-757575757575');
+      expect(r['distance_cm'], 142);
+      expect(r['verdict'], 0);
+      expect(r['is_link_peer'], isTrue);
+      expect(r['flags'], 0x27);
+
+      final a = AnchorDebugTelemetry.decode(_anchorPayload(
+        records: const [_EventRec()],
+      ));
+      final af = a.fieldsMap();
+      expect(af['version'], 2);
+      expect(af['header_len'], 160);
+      expect(af['last_cmd'], 1);
+      expect(af['last_cmd_reason'], 1);
+      expect(af['local_minute'], 480);
+      expect(a.events.single.toRecordMap()['event_id'],
+          '7d7d7d7d-7d7d-7d7d-7d7d-7d7d7d7d7d7d');
     });
   });
 }

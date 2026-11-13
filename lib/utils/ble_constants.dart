@@ -1,13 +1,18 @@
 // Impulse app — the GATT contract.
 //
 // Every UUID and advertising constant this app speaks lives here, and must stay
-// byte-identical with the firmware. The contract has five declarations that must
+// byte-identical with the firmware. The contract has four declarations that must
 // move together (see "add a new characteristic" in CODEMAP.md):
-//   1. MOBILE_APP_SPEC.md §6 — the contract of record.
-//   2. WatchFIrmware/src/main.cpp  — the WATCH_*_UUID #defines.
-//   3. AnchorFirmware/src/main.cpp — the ANCHOR_*_UUID #defines.
-//   4. this file.
-//   5. phone_sim/impulse_phone/constants.py.
+//   1. firmware_spec_v3_nrf.md §4 — the contract of record.
+//   2. nrf_firmware/src/ble/ble_uuids.h — the IMPULSE_UUID_* #defines.
+//   3. this file.
+//   4. phone_sim/impulse_phone/constants.py.
+//
+// Several values below are ESP32-era and now dead on the nRF build: v3 §4.8
+// deleted the anchor's proximity/fingerprint/calibration block and the watch's
+// calibration control. The constants stay declared so the app degrades by
+// probe (a characteristic that is absent simply never binds), but do not
+// assume the device serves them.
 //
 // There is no runtime negotiation of payload layouts: a parser that disagrees
 // with the firmware silently mis-decodes. Characteristics are bound by UUID at
@@ -45,7 +50,11 @@ class BleConstants {
   static const String anchorDockRegisterCharUuid = '4a0f000c-f8ce-11ee-8001-020304050607'; // dock register
   static const String anchorDockStatusCharUuid   = '4a0f000d-f8ce-11ee-8001-020304050607'; // dock status
   static const String anchorCalibModeCharUuid    = '4a0f000f-f8ce-11ee-8001-020304050607'; // calibration-v2 phase (…000F)
-  static const String anchorDebugCharUuid        = '4a0f0020-f8ce-11ee-8001-020304050607'; // §4.4 debug telemetry (read + notify)
+  /// Debug Telemetry **v2** (contract §4.3/§4.4): read + notify, where notify
+  /// is the 8-byte §4.5 change hint only. Appended last in the anchor service
+  /// by R6 so no existing attribute handle moves.
+  static const String anchorDebugTelemetryV2CharUuid =
+      '4a0f0020-f8ce-11ee-8001-020304050607';
 
   // ── Watch ─────────────────────────────────────────────────────────────────
   // The watch is the root of trust: it owns the schedule and the clock. This app
@@ -67,7 +76,11 @@ class BleConstants {
   static const String watchPendingCharUuid     = '4a0f001a-f8ce-11ee-8001-020304050607'; // §9.5 (probe)
   static const String watchEmergencyPassCharUuid = '4a0f001b-f8ce-11ee-8001-020304050607'; // §9.6 (probe)
   static const String watchCalibCtrlCharUuid   = '4a0f001c-f8ce-11ee-8001-020304050607'; // §4.10.7 calibration burst (probe)
-  static const String watchDebugCharUuid       = '4a0f001d-f8ce-11ee-8001-020304050607'; // §5.6 debug telemetry (probe)
+  /// Debug Telemetry **v2** (contract §4.1/§4.2): read + notify, where notify
+  /// is the 8-byte §4.5 change hint only. Appended last in the watch service by
+  /// R6 so no existing attribute handle moves.
+  static const String watchDebugTelemetryV2CharUuid =
+      '4a0f001d-f8ce-11ee-8001-020304050607';
 
   // ── Manufacturer data ─────────────────────────────────────────────────────
   // Custom company ID (0xFFFF) used in place of Apple's 0x004C so that iOS

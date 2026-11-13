@@ -3,12 +3,15 @@
 // not used there).
 //
 // A session is one BLE connection that subscribes to Prox Score `…0009`, Dock
-// Status `…000D` and Debug Telemetry `…0020`. The anchor's connection budget is
-// small (firmware §4.3: phone + watch + repair), so callers must keep sessions
-// short and must call [dispose]. Decoding is intentionally inline and minimal:
-// score is 0..255 score-space, RSSI is biased +128, flags are bit0
-// fingerprint-active / bit1 low-device-count. The Debug Telemetry payload has
-// its own model ([AnchorDebugTelemetry], firmware §4.4).
+// Status `…000D` and Debug Telemetry `…0020`. On the nRF anchor the first two are
+// dead ends: v3 §4.8 deleted the proximity/fingerprint block (`…0008`–`…000b`)
+// and `…000D` returns a literal {0x00,0x00}, so only the `…0020` half of this
+// session produces real telemetry. The anchor holds two links (this phone and the
+// ranging watch, CONFIG_BT_MAX_CONN=2), so callers must keep sessions short and
+// must call [dispose]. Decoding is intentionally inline and minimal: score is
+// 0..255 score-space, RSSI is biased +128, flags are bit0 fingerprint-active /
+// bit1 low-device-count. The Debug Telemetry payload has its own model
+// ([AnchorDebugTelemetry], contract §4.3/§4.4, version 2).
 
 import 'dart:async';
 
@@ -58,15 +61,16 @@ class AnchorTelemetrySession {
   Stream<ProxScoreReading> get proxStream => _proxController.stream;
   Stream<DockStatusReading> get dockStream => _dockController.stream;
 
-  /// Decoded `…0020` snapshots. Notify is a change hint only (the payload is
-  /// longer than an ATT MTU), so a truncated notification triggers a full
+  /// Decoded `…0020` snapshots (v2, contract §4.3). Notify is an 8-byte change
+  /// hint only, so a hint — or a truncated value — triggers one guarded full
   /// read (see the listener in [connect]).
   Stream<AnchorDebugTelemetry> get debugStream => _debugController.stream;
 
   bool get connected => _device?.isConnected ?? false;
 
-  /// Read + decode the anchor Debug Telemetry snapshot once. Null when this
-  /// firmware does not expose `…0020` or the read/decode fails.
+  /// Read + decode the anchor Debug Telemetry snapshot once (`…0020`, v2 —
+  /// contract §4.3/§4.4). Null when this firmware does not expose `…0020` or
+  /// the read/decode fails.
   Future<AnchorDebugTelemetry?> readDebugTelemetry() async {
     final ch = _debugChar;
     if (ch == null) return null;
@@ -77,14 +81,14 @@ class AnchorTelemetrySession {
       fbp.BluetoothCharacteristic ch) async {
     try {
       final bytes = await ch.read();
-      final t = AnchorDebugTelemetry.decode(bytes)
-          .copyWithReceivedAt(DateTime.now());
+      final t = AnchorDebugTelemetry.decode(bytes);
       DebugLogService().log(
         'anchor_debug',
         'wifi=${t.wifiConnected} clock=${t.timeValid} '
-        'beeping=${t.beeping}${t.dockAlarm ? ' (dock)' : ''} '
-        'udp=${t.lastUdpCmdLabel}→${t.lastUdpResult.label} '
-        'events=${t.relevantEvents.length}',
+        'beeping=${t.beeping}${t.beepProfile == null ? '' : ' (${t.beepProfileLabel})'} '
+        'last=${t.lastCmd.label}→${t.lastCmdReason?.label ?? 'none'} '
+        'transport=${t.lastCmdTransport?.label ?? 'none'} '
+        'dock_supported=${t.dockSupported} events=${t.events.length}',
         bytes,
       );
       return t;
@@ -93,6 +97,18 @@ class AnchorTelemetrySession {
           .log('anchor_debug', 'read/decode failed: $e', const []);
       return null;
     }
+  }
+
+  /// One guarded full read after a change hint or a truncated value. Same
+  /// reasoning as the watch side: flutter_blue_plus emits `read()` results on
+  /// this stream too, so the guard is what stops the loop, and the read's own
+  /// result is what the listener decodes.
+  void _readDebugOnce(fbp.BluetoothCharacteristic ch) {
+    if (_debugReadInFlight) return;
+    _debugReadInFlight = true;
+    ch.read()
+        .catchError((_) => <int>[])
+        .whenComplete(() => _debugReadInFlight = false);
   }
 
   /// Connect and subscribe. Returns false on any failure, having already torn
@@ -163,32 +179,27 @@ class AnchorTelemetrySession {
               }
             } catch (_) {}
           }
-          if (uuid == BleConstants.anchorDebugCharUuid) {
-            // Notify is only a change hint (payload > MTU), so read on every
-            // notification and once up front, exactly like the watch side.
+          if (uuid == BleConstants.anchorDebugTelemetryV2CharUuid) {
+            // v2 (§4.3/§4.5): notify is the 8-byte change hint, never the
+            // payload. A hint or a truncated value triggers one guarded full
+            // read; the read's own result comes back through this listener.
             _debugChar = c;
-            //
-            // flutter_blue_plus's onValueReceived fires for read() results as
-            // well as notifications, so "read on every value" would loop
-            // forever. Instead decode what arrived: a complete value (a read
-            // result, or a notification that fit the MTU) is emitted as is;
-            // only a truncated notification fails to decode, and that
-            // triggers one read whose result comes back through this same
-            // listener complete.
             try {
               await c.setNotifyValue(true);
             } catch (_) {}
             _debugSub = c.onValueReceived.listen((bytes) {
+              if (AnchorDebugTelemetry.isHint(bytes)) {
+                _readDebugOnce(c);
+                return;
+              }
               try {
-                _debugController.add(AnchorDebugTelemetry.decode(bytes)
-                    .copyWithReceivedAt(DateTime.now()));
-              } on FormatException {
-                // Re-read only a genuinely truncated v1 value; an unknown
-                // version or malformed value would just fail again.
-                if (_debugReadInFlight || !AnchorDebugTelemetry.looksTruncated(bytes)) return;
-                _debugReadInFlight = true;
-                c.read().catchError((_) => <int>[]).whenComplete(
-                    () => _debugReadInFlight = false);
+                _debugController.add(AnchorDebugTelemetry.decode(bytes));
+              } on FormatException catch (e) {
+                if (!AnchorDebugTelemetry.looksTruncated(bytes)) {
+                  dbg.log('anchor_debug', 'decode failed: $e', bytes);
+                  return;
+                }
+                _readDebugOnce(c);
               }
             });
             // The initial read's value is emitted by the listener above.
