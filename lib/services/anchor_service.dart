@@ -290,7 +290,11 @@ class AnchorService {
       // Subscribe to …000E BEFORE writing so we don't miss the outcome notify.
       AnchorWifiStatus? latestStatus;
       final outcomeCompleter = Completer<void>();
-      if (statusChar != null) {
+      // Same rule as …0003 below: never subscribe to a characteristic that
+      // lacks notify/indicate — on iOS that throws and aborts the offer.
+      final statusNotifies = statusChar != null &&
+          (statusChar.properties.notify || statusChar.properties.indicate);
+      if (statusChar != null && statusNotifies) {
         await statusChar.setNotifyValue(true);
         statusSub = statusChar.onValueReceived.listen((bytes) {
           final s = AnchorWifiStatus.fromBytes(bytes);
@@ -304,27 +308,42 @@ class AnchorService {
         });
       }
 
-      // Capture the accepted/malformed byte the firmware notifies on …0003.
+      // Capture the accepted/malformed byte the firmware notifies on …0003 —
+      // ONLY if the characteristic actually has notify/indicate. The ESP32
+      // anchor's …0003 did; the nRF anchor's is write-only. Calling
+      // setNotifyValue on a characteristic without the property throws on iOS,
+      // which this method's catch turned into connError and a disconnect —
+      // the credentials were never written (2026-11-13, seen on RTT as
+      // repeated "peer connected" / "peer disconnected (0x13)" with no
+      // "wifi credentials received").
       bool accepted = false;
       final acceptCompleter = Completer<void>();
-      await credChar.setNotifyValue(true);
-      credSub = credChar.onValueReceived.listen((bytes) {
-        if (bytes.isNotEmpty) accepted = bytes[0] == 0x01;
-        if (!acceptCompleter.isCompleted) acceptCompleter.complete();
-      });
+      final credNotifies =
+          credChar.properties.notify || credChar.properties.indicate;
+      if (credNotifies) {
+        await credChar.setNotifyValue(true);
+        credSub = credChar.onValueReceived.listen((bytes) {
+          if (bytes.isNotEmpty) accepted = bytes[0] == 0x01;
+          if (!acceptCompleter.isCompleted) acceptCompleter.complete();
+        });
+      }
 
       final payload = utf8.encode(jsonEncode({'ssid': ssid, 'password': password}));
       await credChar.write(payload, withoutResponse: false)
           .timeout(const Duration(seconds: 10));
 
-      // Wait briefly for the accepted byte (best-effort — ATT write already acked).
-      await acceptCompleter.future
-          .timeout(const Duration(seconds: 3), onTimeout: () {});
+      // Wait briefly for the accepted byte (best-effort — ATT write already
+      // acked). With no notify on …0003 (nRF) the ATT write response IS the
+      // acceptance, so there is nothing to wait for.
+      if (credNotifies) {
+        await acceptCompleter.future
+            .timeout(const Duration(seconds: 3), onTimeout: () {});
+      }
       // If we never saw the notify, treat the ATT-acked write as accepted.
       if (!acceptCompleter.isCompleted) accepted = true;
 
       // Then wait (bounded) for the connection outcome via …000E.
-      if (statusChar != null) {
+      if (statusChar != null && statusNotifies) {
         await outcomeCompleter.future.timeout(outcomeWait, onTimeout: () {});
       }
 
